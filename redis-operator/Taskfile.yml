@@ -1,0 +1,46 @@
+version: '3'
+
+tasks:
+  default:
+    deps: [verify]
+
+  generate:
+    desc: Run code generation (deepcopy, CRD manifests)
+    cmds:
+      - controller-gen object paths="./api/..."
+      - controller-gen crd paths="./..." output:crd:artifacts:config=config/crd/bases
+      - controller-gen rbac:roleName=redis-operator paths="./..." output:rbac:artifacts:config=config/rbac
+
+  verify:
+    desc: Vet and test all packages
+    vars:
+      ENVTEST_ASSETS:
+        sh: ~/go/bin/setup-envtest use -p path --bin-dir /tmp/envtest-bin 1.31 2>/dev/null || echo ""
+    env:
+      KUBEBUILDER_ASSETS: "{{.ENVTEST_ASSETS}}"
+    cmds:
+      - go vet ./...
+      - go test ./... -count=1 -timeout=120s
+
+  test:
+    desc: Run all tests with verbose output
+    cmds:
+      - go test ./... -v -count=1
+
+  test-unit:
+    desc: Run unit tests only
+    cmds:
+      - go test ./internal/controller/... -v -count=1
+
+  test-integration:
+    desc: Run envtest integration tests
+    env:
+      KUBEBUILDER_ASSETS:
+        sh: setup-envtest use -p path --bin-dir /tmp/envtest-bin 1.31 2>/dev/null || echo ""
+    cmds:
+      - go test ./test/integration/... -v -count=1
+
+  build:
+    desc: Build the operator binary
+    cmds:
+      - go build -o bin/manager ./cmd/...

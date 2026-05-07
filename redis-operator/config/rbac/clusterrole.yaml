@@ -1,0 +1,53 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: redis-operator
+rules:
+# RedisInstance CR management
+- apiGroups: ["redis.example.io"]
+  resources: ["redisinstances"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["redis.example.io"]
+  resources: ["redisinstances/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["redis.example.io"]
+  resources: ["redisinstances/finalizers"]
+  verbs: ["update"]
+
+# Owned workload resources
+- apiGroups: ["apps"]
+  resources: ["statefulsets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# Pod inspection for scale-down readiness and health checks
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+
+# Secret read-only access (password/TLS Secret references)
+# No create, update, or delete to maintain least privilege.
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+
+# PVC cleanup during finalizer teardown
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "delete"]
+
+# Kubernetes Events for phase transition observability
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+
+# Lease-based leader election (leases.coordination.k8s.io)
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update", "patch", "delete"]
