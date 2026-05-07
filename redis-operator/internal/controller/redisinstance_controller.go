@@ -96,29 +96,33 @@ func (r *RedisInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, r.setFailedPhase(ctx, instance, err.Error())
 	}
 
-	// Gate: skip mutation only when generation is current AND all owned resources exist.
-	needsMutation := instance.Status.ObservedGeneration != instance.Generation ||
-		!r.allOwnedResourcesExist(ctx, instance)
+	// Always reconcile owned resources so that out-of-band drift is corrected even when
+	// observedGeneration is current. CreateOrUpdate is idempotent: no write occurs when
+	// the desired state already matches.
+	if err := r.reconcileConfigMap(ctx, instance); err != nil {
+		logger.Error(err, "failed to reconcile ConfigMap")
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileService(ctx, instance); err != nil {
+		logger.Error(err, "failed to reconcile Service")
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileStatefulSet(ctx, instance); err != nil {
+		logger.Error(err, "failed to reconcile StatefulSet")
+		return ctrl.Result{}, err
+	}
+	if instance.Spec.Topology == redisv1alpha1.TopologySentinel {
+		if err := r.reconcileSentinelResources(ctx, instance); err != nil {
+			logger.Error(err, "failed to reconcile Sentinel resources")
+			return ctrl.Result{}, err
+		}
+	}
 
-	if needsMutation {
-		if err := r.reconcileConfigMap(ctx, instance); err != nil {
-			logger.Error(err, "failed to reconcile ConfigMap")
-			return ctrl.Result{}, err
-		}
-		if err := r.reconcileService(ctx, instance); err != nil {
-			logger.Error(err, "failed to reconcile Service")
-			return ctrl.Result{}, err
-		}
-		if err := r.reconcileStatefulSet(ctx, instance); err != nil {
-			logger.Error(err, "failed to reconcile StatefulSet")
-			return ctrl.Result{}, err
-		}
-		if instance.Spec.Topology == redisv1alpha1.TopologySentinel {
-			if err := r.reconcileSentinelResources(ctx, instance); err != nil {
-				logger.Error(err, "failed to reconcile Sentinel resources")
-				return ctrl.Result{}, err
-			}
-		}
+	// Scale-down: wait for higher-ordinal pods to finish terminating before updating status.
+	if requeue, err := r.waitForScaleDown(ctx, instance); err != nil {
+		return ctrl.Result{}, err
+	} else if requeue {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	if err := r.updateStatus(ctx, instance); err != nil {
@@ -129,18 +133,24 @@ func (r *RedisInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 // handleDeletion performs ordered teardown and removes the finalizer.
+// Order: Sentinel StatefulSet → Sentinel Service → Redis StatefulSet → pods drained → PVCs → finalizer.
 func (r *RedisInstanceReconciler) handleDeletion(ctx context.Context, instance *redisv1alpha1.RedisInstance) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("handling deletion of RedisInstance", "name", instance.Name)
 
-	// 1. Delete Sentinel StatefulSet and Service first (if applicable).
+	// 1. Stop Sentinel StatefulSet first; requeue until it is gone.
 	if instance.Spec.Topology == redisv1alpha1.TopologySentinel {
 		sentinelSS := &appsv1.StatefulSet{}
-		if err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-sentinel", Namespace: instance.Namespace}, sentinelSS); err == nil {
+		sentinelSSKey := types.NamespacedName{Name: instance.Name + "-sentinel", Namespace: instance.Namespace}
+		if err := r.Get(ctx, sentinelSSKey, sentinelSS); err == nil {
 			if err := r.Delete(ctx, sentinelSS); client.IgnoreNotFound(err) != nil {
 				return ctrl.Result{}, err
 			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
 		}
+		// Sentinel SS is gone; clean up the Service.
 		sentinelSvc := &corev1.Service{}
 		if err := r.Get(ctx, types.NamespacedName{Name: instance.Name + "-sentinel", Namespace: instance.Namespace}, sentinelSvc); err == nil {
 			if err := r.Delete(ctx, sentinelSvc); client.IgnoreNotFound(err) != nil {
@@ -149,19 +159,28 @@ func (r *RedisInstanceReconciler) handleDeletion(ctx context.Context, instance *
 		}
 	}
 
-	// 2. Delete the Redis StatefulSet (in reverse ordinal, StatefulSet controller handles this).
+	// 2. Delete the Redis StatefulSet (controller deletes pods in reverse ordinal order).
 	redisSS := &appsv1.StatefulSet{}
 	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, redisSS); err == nil {
 		if err := r.Delete(ctx, redisSS); client.IgnoreNotFound(err) != nil {
 			return ctrl.Result{}, err
 		}
-		// Requeue until the StatefulSet is gone.
-		if err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, redisSS); err == nil {
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	} else if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
 	}
 
-	// 3. Delete owned PVCs.
+	// 3. Wait for all Redis pods to terminate before deleting PVCs.
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList, client.InNamespace(instance.Namespace),
+		client.MatchingLabels(redisLabels(instance.Name))); err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(podList.Items) > 0 {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	// 4. Delete owned PVCs.
 	pvcList := &corev1.PersistentVolumeClaimList{}
 	if err := r.List(ctx, pvcList, client.InNamespace(instance.Namespace),
 		client.MatchingLabels(redisLabels(instance.Name))); err != nil {
@@ -173,7 +192,7 @@ func (r *RedisInstanceReconciler) handleDeletion(ctx context.Context, instance *
 		}
 	}
 
-	// 4. Remove finalizer.
+	// 5. Remove finalizer.
 	controllerutil.RemoveFinalizer(instance, FinalizerName)
 	if err := r.Update(ctx, instance); err != nil {
 		return ctrl.Result{}, err
@@ -199,31 +218,22 @@ func (r *RedisInstanceReconciler) validateAuthSecret(ctx context.Context, instan
 	return nil
 }
 
-// allOwnedResourcesExist returns true when all required owned resources are present.
-func (r *RedisInstanceReconciler) allOwnedResourcesExist(ctx context.Context, instance *redisv1alpha1.RedisInstance) bool {
-	if !r.resourceExists(ctx, instance.Namespace, instance.Name+"-config", &corev1.ConfigMap{}) {
-		return false
+// waitForScaleDown returns (true, nil) when Redis pods with ordinal >= spec.replicas are still
+// terminating after a scale-down, so the caller can requeue and wait.
+func (r *RedisInstanceReconciler) waitForScaleDown(ctx context.Context, instance *redisv1alpha1.RedisInstance) (bool, error) {
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList,
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabels(redisLabels(instance.Name))); err != nil {
+		return false, err
 	}
-	if !r.resourceExists(ctx, instance.Namespace, instance.Name, &corev1.Service{}) {
-		return false
-	}
-	if !r.resourceExists(ctx, instance.Namespace, instance.Name, &appsv1.StatefulSet{}) {
-		return false
-	}
-	if instance.Spec.Topology == redisv1alpha1.TopologySentinel {
-		if !r.resourceExists(ctx, instance.Namespace, instance.Name+"-sentinel", &appsv1.StatefulSet{}) {
-			return false
-		}
-		if !r.resourceExists(ctx, instance.Namespace, instance.Name+"-sentinel", &corev1.Service{}) {
-			return false
+	active := int32(0)
+	for i := range podList.Items {
+		if podList.Items[i].DeletionTimestamp.IsZero() {
+			active++
 		}
 	}
-	return true
-}
-
-func (r *RedisInstanceReconciler) resourceExists(ctx context.Context, ns, name string, obj client.Object) bool {
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, obj)
-	return err == nil
+	return active > instance.Spec.Replicas, nil
 }
 
 // reconcileConfigMap creates or updates the redis.conf ConfigMap.
@@ -314,6 +324,8 @@ func (r *RedisInstanceReconciler) reconcileStatefulSet(ctx context.Context, inst
 }
 
 // buildRedisPodTemplate constructs the pod template for Redis StatefulSet pods.
+// Ordinal 0 starts as standalone primary; pods with ordinal > 0 are configured as
+// replicas via a startup script that reads the pod hostname.
 func buildRedisPodTemplate(instance *redisv1alpha1.RedisInstance, restartHash string) corev1.PodTemplateSpec {
 	labels := redisLabels(instance.Name)
 
@@ -379,6 +391,19 @@ func buildRedisPodTemplate(instance *redisv1alpha1.RedisInstance, restartHash st
 		annotationRestartHash: restartHash,
 	}
 
+	// Startup script: ordinal 0 is the primary; ordinal > 0 connects as a replica.
+	// Both standalone and sentinel topologies use the same primary-plus-replicas model.
+	masterDNS := fmt.Sprintf("%s-0.%s.%s.svc.cluster.local", instance.Name, instance.Name, instance.Namespace)
+	startCmd := fmt.Sprintf(
+		`ORDINAL=$(hostname | rev | cut -d- -f1 | rev); `+
+			`if [ "$ORDINAL" -eq "0" ]; then `+
+			`exec redis-server /etc/redis/redis.conf; `+
+			`else `+
+			`exec redis-server /etc/redis/redis.conf --replicaof %s %d; `+
+			`fi`,
+		masterDNS, redisPort,
+	)
+
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      labels,
@@ -390,17 +415,14 @@ func buildRedisPodTemplate(instance *redisv1alpha1.RedisInstance, restartHash st
 			},
 			Containers: []corev1.Container{
 				{
-					Name:  "redis",
-					Image: instance.Spec.RedisVersion,
-					Command: []string{
-						"redis-server",
-						"/etc/redis/redis.conf",
-					},
-					Env: envVars,
+					Name:    "redis",
+					Image:   instance.Spec.RedisVersion,
+					Command: []string{"sh", "-c", startCmd},
+					Env:     envVars,
 					Ports: []corev1.ContainerPort{
 						{Name: "redis", ContainerPort: redisPort, Protocol: corev1.ProtocolTCP},
 					},
-					Resources: instance.Spec.Resources,
+					Resources:    instance.Spec.Resources,
 					VolumeMounts: volumeMounts,
 					SecurityContext: &corev1.SecurityContext{
 						ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
@@ -611,11 +633,17 @@ func (r *RedisInstanceReconciler) updateStatus(ctx context.Context, instance *re
 			instance.Status.Phase = redisv1alpha1.PhaseDegraded
 		}
 
-		// Primary is ordinal 0 pod DNS.
-		instance.Status.MasterEndpoint = fmt.Sprintf(
-			"%s-0.%s.%s.svc.cluster.local",
-			instance.Name, instance.Name, instance.Namespace,
-		)
+		// For standalone topology the primary is always ordinal 0.
+		// For sentinel topology the primary can change after failover, so we leave
+		// masterEndpoint empty and let clients discover it through Sentinel.
+		if instance.Spec.Topology != redisv1alpha1.TopologySentinel {
+			instance.Status.MasterEndpoint = fmt.Sprintf(
+				"%s-0.%s.%s.svc.cluster.local",
+				instance.Name, instance.Name, instance.Namespace,
+			)
+		} else {
+			instance.Status.MasterEndpoint = ""
+		}
 	}
 
 	// Sentinel endpoints.

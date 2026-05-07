@@ -37,7 +37,7 @@
 - [x] Skip Sentinel resources when `spec.topology == standalone`
 - [x] Implement scale-up by increasing StatefulSet replicas
 - [x] Implement scale-down by reducing StatefulSet replicas to the desired count
-- [ ] Wait for higher-ordinal pods to terminate before completing scale-down reconciliation
+- [x] Wait for higher-ordinal pods to terminate before completing scale-down reconciliation
 - [x] Preserve the headless Service selector for remaining Redis pods after scale-down
 - [x] Implement rolling restart trigger on `spec.redisVersion` changes
 - [x] Implement rolling restart trigger on `spec.config` changes

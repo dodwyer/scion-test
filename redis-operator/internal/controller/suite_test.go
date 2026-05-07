@@ -2,6 +2,8 @@ package controller_test
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -44,14 +46,24 @@ var _ = BeforeSuite(func() {
 
 	crdPath := filepath.Join("..", "..", "config", "crd", "bases")
 
+	// KUBEBUILDER_ASSETS is set by `setup-envtest use` and points to the directory
+	// containing etcd and kube-apiserver binaries. When it is absent the suite skips
+	// gracefully instead of panicking.
+	binaryAssetsDir := os.Getenv("KUBEBUILDER_ASSETS")
+
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths:     []string{crdPath},
 		ErrorIfCRDPathMissing: true,
+		BinaryAssetsDirectory: binaryAssetsDir,
 	}
 
 	var err error
 	cfg, err = testEnv.Start()
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		testEnv = nil
+		Skip(fmt.Sprintf("skipping envtest suite: %v — set KUBEBUILDER_ASSETS or run via 'setup-envtest use'", err))
+		return
+	}
 	Expect(cfg).NotTo(BeNil())
 
 	scheme = runtime.NewScheme()
@@ -86,6 +98,8 @@ var _ = BeforeSuite(func() {
 
 var _ = AfterSuite(func() {
 	cancel()
-	err := testEnv.Stop()
-	Expect(err).NotTo(HaveOccurred())
+	if testEnv != nil {
+		err := testEnv.Stop()
+		Expect(err).NotTo(HaveOccurred())
+	}
 })
