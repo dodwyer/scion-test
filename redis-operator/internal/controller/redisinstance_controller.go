@@ -65,8 +65,8 @@ func (r *RedisInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.handleDeletion(ctx, ri)
 	}
 
-	// Step 4: generation gate — skip resource mutation only when generation matches
-	// AND all required owned resources already exist.
+	// Step 4: generation gate — skip resource mutation only when generation matches,
+	// all required owned resources exist, AND none of them has drifted out-of-band.
 	skipMutation := ri.Status.ObservedGeneration == ri.Generation
 	if skipMutation {
 		allExist, err := r.allResourcesExist(ctx, ri)
@@ -74,6 +74,15 @@ func (r *RedisInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, err
 		}
 		if !allExist {
+			skipMutation = false
+		}
+	}
+	if skipMutation {
+		drifted, err := r.hasResourceDrift(ctx, ri)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if drifted {
 			skipMutation = false
 		}
 	}
@@ -149,6 +158,36 @@ func (r *RedisInstanceReconciler) allResourcesExist(ctx context.Context, ri *red
 		}
 	}
 	return true, nil
+}
+
+// hasResourceDrift returns true when a key owned resource has been modified out-of-band
+// since the last reconcile — e.g. replica count changed directly on the StatefulSet,
+// or the headless Service's ClusterIP was altered.
+func (r *RedisInstanceReconciler) hasResourceDrift(ctx context.Context, ri *redisv1alpha1.RedisInstance) (bool, error) {
+	// Check StatefulSet for replica-count or config/version drift.
+	sts := &appsv1.StatefulSet{}
+	if err := r.Get(ctx, namespacedName(ri.Namespace, ri.Name), sts); err != nil {
+		// Missing resources are handled by allResourcesExist; not a drift concern here.
+		return false, client.IgnoreNotFound(err)
+	}
+	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != ri.Spec.Replicas {
+		return true, nil
+	}
+	// configHashAnnotation covers spec.config + spec.redisVersion changes.
+	if sts.Spec.Template.Annotations[configHashAnnotation] != computeConfigHash(ri) {
+		return true, nil
+	}
+
+	// Check headless Service: ClusterIP must be "None".
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, namespacedName(ri.Namespace, ri.Name), svc); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	if svc.Spec.ClusterIP != "None" {
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // isScalingDown returns true when there are still Redis pods above the desired replica count.

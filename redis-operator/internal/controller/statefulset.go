@@ -19,7 +19,10 @@ const (
 	dataVolumeName       = "data"
 	configVolumeName     = "config"
 	tmpVolumeName        = "tmp"
+	tlsVolumeName        = "tls"
+	tlsMountPath         = "/tls"
 	redisPort            = int32(6379)
+	redisTLSPort         = int32(6380)
 	redisUser            = int64(999)
 )
 
@@ -55,6 +58,54 @@ func (r *RedisInstanceReconciler) reconcileStatefulSet(ctx context.Context, ri *
 func buildRedisPodTemplate(ri *redisv1alpha1.RedisInstance) corev1.PodTemplateSpec {
 	labels := podLabels(ri.Name, componentRedis)
 	initEnv := buildInitEnv(ri)
+	tlsEnabled := ri.Spec.Auth != nil && ri.Spec.Auth.TLS != nil
+
+	// Build init container volume mounts — always data+config, add tls when configured.
+	initVolumeMounts := []corev1.VolumeMount{
+		{Name: dataVolumeName, MountPath: "/data"},
+		{Name: configVolumeName, MountPath: "/base-config"},
+	}
+	// Build main container volume mounts — always data+tmp, add tls when configured.
+	mainVolumeMounts := []corev1.VolumeMount{
+		{Name: dataVolumeName, MountPath: "/data"},
+		{Name: tmpVolumeName, MountPath: "/tmp"},
+	}
+	// Build container ports — always 6379, add 6380 (TLS) when configured.
+	ports := []corev1.ContainerPort{
+		{Name: "redis", ContainerPort: redisPort, Protocol: corev1.ProtocolTCP},
+	}
+	// Build volumes — always config+tmp, add tls secret volume when configured.
+	volumes := []corev1.Volume{
+		{
+			Name: configVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: ri.Name + "-config"},
+				},
+			},
+		},
+		{
+			Name:         tmpVolumeName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+	}
+
+	if tlsEnabled {
+		tlsMount := corev1.VolumeMount{Name: tlsVolumeName, MountPath: tlsMountPath, ReadOnly: true}
+		initVolumeMounts = append(initVolumeMounts, tlsMount)
+		mainVolumeMounts = append(mainVolumeMounts, tlsMount)
+		ports = append(ports, corev1.ContainerPort{
+			Name: "redis-tls", ContainerPort: redisTLSPort, Protocol: corev1.ProtocolTCP,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: tlsVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: ri.Spec.Auth.TLS.SecretRef.Name,
+				},
+			},
+		})
+	}
 
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -78,34 +129,29 @@ func buildRedisPodTemplate(ri *redisv1alpha1.RedisInstance) corev1.PodTemplateSp
 					Command: []string{"/bin/sh", "-c", `
 ORDINAL=$(echo "${HOSTNAME}" | awk -F- '{print $NF}')
 cp /base-config/redis.conf /data/redis.conf
-if [ "${TOPOLOGY}" = "standalone" ] && [ "${ORDINAL}" != "0" ]; then
+if [ "${ORDINAL}" != "0" ]; then
     printf "\nreplicaof %s 6379\n" "${REDIS_PRIMARY_HOST}" >> /data/redis.conf
 fi
 if [ -n "${REDIS_PASSWORD}" ]; then
     printf "\nrequirepass %s\nmasterauth %s\n" "${REDIS_PASSWORD}" "${REDIS_PASSWORD}" >> /data/redis.conf
 fi
+if [ "${TLS_ENABLED}" = "true" ]; then
+    printf "\ntls-cert-file /tls/tls.crt\ntls-key-file /tls/tls.key\ntls-port 6380\n" >> /data/redis.conf
+fi
 `},
-					Env: initEnv,
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: dataVolumeName, MountPath: "/data"},
-						{Name: configVolumeName, MountPath: "/base-config"},
-					},
+					Env:          initEnv,
+					VolumeMounts: initVolumeMounts,
 					SecurityContext: containerSecurityContext(),
 				},
 			},
 			Containers: []corev1.Container{
 				{
-					Name:    componentRedis,
-					Image:   ri.Spec.RedisVersion,
-					Command: []string{"redis-server", "/data/redis.conf"},
-					Ports: []corev1.ContainerPort{
-						{Name: "redis", ContainerPort: redisPort, Protocol: corev1.ProtocolTCP},
-					},
+					Name:      componentRedis,
+					Image:     ri.Spec.RedisVersion,
+					Command:   []string{"redis-server", "/data/redis.conf"},
+					Ports:     ports,
 					Resources: ri.Spec.Resources,
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: dataVolumeName, MountPath: "/data"},
-						{Name: tmpVolumeName, MountPath: "/tmp"},
-					},
+					VolumeMounts: mainVolumeMounts,
 					SecurityContext: containerSecurityContext(),
 					LivenessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
@@ -129,20 +175,7 @@ fi
 					},
 				},
 			},
-			Volumes: []corev1.Volume{
-				{
-					Name: configVolumeName,
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: ri.Name + "-config"},
-						},
-					},
-				},
-				{
-					Name:         tmpVolumeName,
-					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-				},
-			},
+			Volumes: volumes,
 		},
 	}
 }
@@ -161,6 +194,11 @@ func buildInitEnv(ri *redisv1alpha1.RedisInstance) []corev1.EnvVar {
 			},
 		})
 	}
+	tlsEnabled := "false"
+	if ri.Spec.Auth != nil && ri.Spec.Auth.TLS != nil {
+		tlsEnabled = "true"
+	}
+	env = append(env, corev1.EnvVar{Name: "TLS_ENABLED", Value: tlsEnabled})
 	return env
 }
 
@@ -176,12 +214,19 @@ func containerSecurityContext() *corev1.SecurityContext {
 }
 
 // redisPVCTemplates builds the volumeClaimTemplates from the CR storage spec.
+// Labels are set on each template so that all PVCs can be discovered by label
+// selector during cleanup (covering scale-down scenarios).
 func redisPVCTemplates(ri *redisv1alpha1.RedisInstance) []corev1.PersistentVolumeClaim {
 	pvcMeta := ri.Spec.Storage.ObjectMeta.DeepCopy()
 	if pvcMeta == nil {
 		pvcMeta = &metav1.ObjectMeta{}
 	}
 	pvcMeta.Name = dataVolumeName
+	// Ensure resource labels are present so deleteOwnedPVCs can list all PVCs
+	// regardless of the current spec.replicas value.
+	if pvcMeta.Labels == nil {
+		pvcMeta.Labels = resourceLabels(ri.Name, componentRedis)
+	}
 	return []corev1.PersistentVolumeClaim{
 		{
 			ObjectMeta: *pvcMeta,

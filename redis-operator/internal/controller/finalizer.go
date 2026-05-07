@@ -69,19 +69,21 @@ func (r *RedisInstanceReconciler) handleDeletion(ctx context.Context, ri *redisv
 	return ctrl.Result{}, r.Update(ctx, ri)
 }
 
-// deleteOwnedPVCs deletes the PVCs created by the Redis StatefulSet volumeClaimTemplates.
+// deleteOwnedPVCs deletes all PVCs created by the Redis StatefulSet volumeClaimTemplates.
+// It uses a label selector to discover PVCs rather than iterating up to spec.replicas,
+// so previously scaled-down replicas (with ordinals above the current spec) are also cleaned up.
 func (r *RedisInstanceReconciler) deleteOwnedPVCs(ctx context.Context, ri *redisv1alpha1.RedisInstance) error {
-	for i := int32(0); i < ri.Spec.Replicas; i++ {
-		pvcName := fmt.Sprintf("%s-%s-%d", dataVolumeName, ri.Name, i)
-		pvc := &corev1.PersistentVolumeClaim{}
-		if err := r.Get(ctx, namespacedName(ri.Namespace, pvcName), pvc); err != nil {
-			if errors.IsNotFound(err) {
-				continue
-			}
-			return err
-		}
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcList,
+		client.InNamespace(ri.Namespace),
+		client.MatchingLabels(resourceLabels(ri.Name, componentRedis)),
+	); err != nil {
+		return fmt.Errorf("list owned pvcs: %w", err)
+	}
+	for i := range pvcList.Items {
+		pvc := &pvcList.Items[i]
 		if err := r.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
-			return fmt.Errorf("delete pvc %s: %w", pvcName, err)
+			return fmt.Errorf("delete pvc %s: %w", pvc.Name, err)
 		}
 	}
 	return nil
