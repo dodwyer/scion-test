@@ -7,6 +7,87 @@
 
 ---
 
+## ADDED Requirements
+
+### Requirement: Namespaced Redis Custom Resource
+
+The operator SHALL provide a namespaced `Redis` custom resource in API group
+`redis.example.io/v1alpha1` that captures the desired Redis topology, version,
+storage, configuration, authentication, TLS, scheduling, and update strategy.
+
+#### Scenario: Create a standalone Redis resource
+
+- **Given** a user applies a valid `Redis` resource with `spec.mode:
+  Standalone`, `spec.replicas: 1`, and a supported `spec.version`
+- **When** the operator reconciles the resource
+- **Then** the operator creates the required Kubernetes objects in the same
+  namespace and records the reconciled generation in status
+
+#### Scenario: Reject invalid topology
+
+- **Given** a user applies a `Redis` resource with `spec.mode: Sentinel` and an
+  even replica count
+- **When** Kubernetes admission evaluates the resource
+- **Then** the CRD or validating webhook rejects the resource before reconcile
+
+### Requirement: Kubernetes Owned Runtime Objects
+
+The operator SHALL reconcile Kubernetes-native owned objects for each Redis
+resource, including a StatefulSet, headless Service, primary Service,
+ConfigMap, PodDisruptionBudget, optional replica Service, optional TLS Secret
+mounts, and finalizer-managed deletion behavior.
+
+#### Scenario: Reconcile owned objects
+
+- **Given** a valid `Redis` resource exists
+- **When** reconcile completes successfully
+- **Then** every owned object has a controller ownerReference to the `Redis`
+  resource and carries labels that match the operator-managed Service selectors
+
+### Requirement: Status and Conditions
+
+The operator SHALL publish status fields and Kubernetes-style conditions that
+describe readiness, progression, degradation, observed generation, active
+version, replica counts, and the current master reference where applicable.
+
+#### Scenario: Report running state
+
+- **Given** all desired Redis pods are ready and the generated configuration is
+  synchronized
+- **When** the operator updates status
+- **Then** `status.phase` is `Running`, `Available=True`,
+  `Progressing=False`, and `status.readyReplicas` equals `spec.replicas`
+
+### Requirement: Safe Reconciliation Workflows
+
+The operator SHALL handle config changes, scaling, upgrades, Sentinel failover,
+and deletion through deterministic reconciliation workflows that preserve
+Kubernetes object ownership and surface blocking conditions in status.
+
+#### Scenario: Rolling version upgrade
+
+- **Given** a user changes `spec.version` to another supported Redis version
+- **When** reconcile observes the new generation
+- **Then** the operator updates the StatefulSet and reports progress until all
+  Redis pods run the requested version or a blocking condition is recorded
+
+### Requirement: Verification Gates
+
+The implementation SHALL include unit, envtest/integration, kind end-to-end,
+security, and operator scorecard checks that verify the CRD schema, webhook
+validation, reconciliation invariants, lifecycle behavior, and runtime
+hardening.
+
+#### Scenario: Validate in a kind cluster
+
+- **Given** the operator is deployed from its Kubernetes manifests into a kind
+  cluster
+- **When** a valid `Redis` resource is created and then upgraded
+- **Then** the test observes `Available=True`, correct owned objects, updated
+  Redis pods, and no critical security findings in the operator image
+
+---
+
 ## 1. CRD Definition
 
 ### 1.1 TypeMeta

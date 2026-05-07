@@ -4,6 +4,17 @@ Tasks are sequenced by dependency. Each task produces a reviewable artifact or a
 
 ---
 
+## Implementation Checklist
+
+- [ ] Scaffold the Go operator project with controller-runtime/operator-sdk and verify `make generate`, `make manifests`, and `go test ./...`.
+- [ ] Define the namespaced `Redis` API, status conditions, CRD validation, defaulting webhook, and validating webhook for immutable and unsafe fields.
+- [ ] Implement the core reconciler for ConfigMap, Services, StatefulSet, PodDisruptionBudget, finalizer, events, and status updates.
+- [ ] Add Sentinel high-availability reconciliation, failover detection, master status updates, and Sentinel endpoint reporting.
+- [ ] Implement config, auth, TLS, upgrade, and scale workflows with unit, integration, and kind end-to-end coverage.
+- [ ] Harden RBAC, pod security context, metrics, structured logging, and release/install manifests.
+
+---
+
 ## Phase 1 — Scaffolding & API
 
 | ID | Task | Acceptance Criteria |
