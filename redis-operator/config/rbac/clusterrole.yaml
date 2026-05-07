@@ -1,0 +1,119 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: redis-operator-manager-role
+  labels:
+    app.kubernetes.io/name: redis-operator
+    app.kubernetes.io/managed-by: redis-operator
+rules:
+# RedisInstance CRD management
+- apiGroups:
+  - redis.example.io
+  resources:
+  - redisinstances
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+- apiGroups:
+  - redis.example.io
+  resources:
+  - redisinstances/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - redis.example.io
+  resources:
+  - redisinstances/finalizers
+  verbs:
+  - update
+# StatefulSet management
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+# Service management
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+# ConfigMap management
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+# Pod inspection (read-only)
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+# Secret inspection (read-only for auth config)
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+# PVC cleanup during teardown
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - get
+  - list
+  - watch
+  - delete
+# Event emission
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+# Leader election leases
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - create
+  - update
+  - patch
+  - delete
