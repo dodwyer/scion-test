@@ -1,0 +1,251 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.4
+  name: redisinstances.redis.example.io
+spec:
+  group: redis.example.io
+  names:
+    kind: RedisInstance
+    listKind: RedisInstanceList
+    plural: redisinstances
+    singular: redisinstance
+    shortNames:
+    - ri
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.replicas
+      name: Replicas
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .spec.topology
+      name: Topology
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: RedisInstance is the Schema for the redisinstances API.
+        type: object
+        properties:
+          apiVersion:
+            description: APIVersion defines the versioned schema of this representation of an object.
+            type: string
+          kind:
+            description: Kind is a string value representing the REST resource this object represents.
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: RedisInstanceSpec defines the desired state of RedisInstance.
+            type: object
+            required:
+            - replicas
+            - redisVersion
+            - storage
+            - topology
+            properties:
+              replicas:
+                description: Replicas is the total number of Redis pods (one primary + N-1 read replicas).
+                type: integer
+                format: int32
+                minimum: 1
+              redisVersion:
+                description: RedisVersion is the Redis container image reference (e.g. "redis:7.2").
+                type: string
+                minLength: 1
+              storage:
+                description: Storage defines the PVC template for Redis data volumes. Required in v1.
+                type: object
+                required:
+                - volumeClaimTemplate
+                properties:
+                  volumeClaimTemplate:
+                    description: VolumeClaimTemplate is the PVC template for Redis data storage.
+                    type: object
+                    properties:
+                      metadata:
+                        type: object
+                        properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          labels:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          name:
+                            type: string
+                      spec:
+                        description: PersistentVolumeClaimSpec describes the common attributes of storage devices.
+                        type: object
+                        properties:
+                          accessModes:
+                            type: array
+                            items:
+                              type: string
+                          resources:
+                            type: object
+                            properties:
+                              requests:
+                                additionalProperties:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                type: object
+                          storageClassName:
+                            type: string
+                          volumeMode:
+                            type: string
+              resources:
+                description: Resources sets CPU and memory requests/limits for Redis containers.
+                type: object
+                properties:
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    type: object
+              config:
+                description: Config contains redis.conf key/value overrides.
+                type: object
+                additionalProperties:
+                  type: string
+              auth:
+                description: Auth configures optional password and TLS authentication.
+                type: object
+                properties:
+                  passwordSecretRef:
+                    description: PasswordSecretRef references a Secret key holding the Redis password.
+                    type: object
+                    required:
+                    - key
+                    - name
+                    properties:
+                      key:
+                        description: The key of the secret to select from.
+                        type: string
+                      name:
+                        description: Name of the referent Secret.
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be defined.
+                        type: boolean
+                  tls:
+                    description: TLS configures optional TLS for Redis connections.
+                    type: object
+                    required:
+                    - secretRef
+                    properties:
+                      secretRef:
+                        description: SecretRef is the name of the Secret containing the TLS certificate and key.
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+              topology:
+                description: Topology selects the Redis deployment topology. Allowed values are standalone and sentinel.
+                type: string
+                enum:
+                - standalone
+                - sentinel
+          status:
+            description: RedisInstanceStatus defines the observed state of RedisInstance.
+            type: object
+            properties:
+              phase:
+                description: Phase summarises the current lifecycle phase of the instance.
+                type: string
+              conditions:
+                description: Conditions contains detailed condition information for the instance.
+                type: array
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  type: object
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another.
+                      type: string
+                      format: date-time
+                    message:
+                      description: message is a human readable message indicating details about the transition.
+                      type: string
+                      maxLength: 32768
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon.
+                      type: integer
+                      format: int64
+                      minimum: 0
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                      type: string
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                    type:
+                      description: type of condition in CamelCase.
+                      type: string
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the most recent metadata.generation seen by the controller.
+                type: integer
+                format: int64
+              readyReplicas:
+                description: ReadyReplicas is the count of Redis pods that are currently ready.
+                type: integer
+                format: int32
+              masterEndpoint:
+                description: MasterEndpoint is the DNS name of the current writable primary pod.
+                type: string
+              sentinelEndpoints:
+                description: SentinelEndpoints lists the DNS names of Sentinel pods (sentinel topology only).
+                type: array
+                items:
+                  type: string
+    served: true
+    storage: true
+    subresources:
+      status: {}

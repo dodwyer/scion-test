@@ -1,0 +1,129 @@
+---
+# ClusterRole grants only the verbs and resources required by the reconcile loop.
+# No wildcard permissions; Secrets are read-only (get/list/watch only).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: redis-operator-role
+rules:
+# RedisInstance CRD resources.
+- apiGroups:
+  - redis.example.io
+  resources:
+  - redisinstances
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - redis.example.io
+  resources:
+  - redisinstances/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - redis.example.io
+  resources:
+  - redisinstances/finalizers
+  verbs:
+  - update
+
+# StatefulSets for Redis and Sentinel pods.
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+
+# Services (headless service for StatefulSet DNS + Sentinel service).
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+
+# ConfigMaps for redis.conf rendering.
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+
+# Pods — read-only; operator inspects readiness, does not mutate pods directly.
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+
+# Secrets — read-only (never create, update, or delete credentials).
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+
+# PersistentVolumeClaims — read and delete (for finalizer teardown only).
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - get
+  - list
+  - watch
+  - delete
+
+# Events — create and patch for phase-transition events.
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+
+# Leases — required for leader election via leases.coordination.k8s.io.
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - create
+  - update
+  - patch
+  - delete

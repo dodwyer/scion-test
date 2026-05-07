@@ -1,0 +1,75 @@
+version: "3"
+
+vars:
+  MODULE: github.com/example/redis-operator
+  CONTROLLER_GEN_VERSION: v0.16.4
+  ENVTEST_VERSION: release-0.19
+
+tasks:
+  default:
+    desc: Run all checks (fmt, vet, test)
+    cmds:
+      - task: fmt
+      - task: vet
+      - task: test
+
+  fmt:
+    desc: Run gofmt
+    cmds:
+      - gofmt -w ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  tidy:
+    desc: Tidy Go module dependencies
+    cmds:
+      - go mod tidy
+
+  build:
+    desc: Build the manager binary
+    cmds:
+      - go build -o bin/manager ./cmd/...
+
+  test:
+    desc: Run unit tests (no envtest)
+    cmds:
+      - go test -v -count=1 ./api/...
+
+  test-integration:
+    desc: Run envtest integration tests
+    vars:
+      ENVTEST_ASSETS_DIR: "{{.ROOT_DIR}}/testbin"
+    cmds:
+      - |
+        if ! command -v setup-envtest &>/dev/null; then
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@{{.ENVTEST_VERSION}}
+        fi
+        KUBEBUILDER_ASSETS=$(setup-envtest use --bin-dir {{.ENVTEST_ASSETS_DIR}} -p path)
+        export KUBEBUILDER_ASSETS
+        go test -v -count=1 -timeout 120s ./internal/controller/...
+
+  verify:
+    desc: Run all verifications (fmt, vet, unit tests, integration tests)
+    cmds:
+      - task: fmt
+      - task: vet
+      - task: test
+      - task: test-integration
+
+  generate:
+    desc: Generate CRD manifests and deepcopy methods using controller-gen
+    cmds:
+      - |
+        if ! command -v controller-gen &>/dev/null; then
+          go install sigs.k8s.io/controller-tools/cmd/controller-gen@{{.CONTROLLER_GEN_VERSION}}
+        fi
+        controller-gen rbac:roleName=redis-operator-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/rbac
+
+  install-tools:
+    desc: Install controller-gen and setup-envtest
+    cmds:
+      - go install sigs.k8s.io/controller-tools/cmd/controller-gen@{{.CONTROLLER_GEN_VERSION}}
+      - go install sigs.k8s.io/controller-runtime/tools/setup-envtest@{{.ENVTEST_VERSION}}
