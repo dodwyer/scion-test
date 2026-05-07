@@ -4,6 +4,8 @@
 
 This spec defines how the Redis Operator itself is packaged, installed, and configured on a Kubernetes cluster. It covers the Helm chart, Kustomize overlay, operator Deployment, RBAC, and single-namespace vs cluster-wide modes. There is no pre-existing deployment; all requirements are additive.
 
+**Relationship between Helm chart and Kustomize overlay**: kubebuilder scaffolding generates a `config/` directory containing raw Kustomize-compatible YAML (CRD, RBAC, manager Deployment). The Helm chart at `charts/redis-operator/` wraps those manifests with parameterisation (image tags, namespace, RBAC toggles) for end-user installation. Both paths deploy the same operator but serve different audiences: Kustomize for GitOps pipelines, Helm for interactive installation.
+
 ---
 
 ## ADDED Requirements
