@@ -725,7 +725,8 @@ func (r *RedisInstanceReconciler) desiredSentinelService(instance *redisv1alpha1
 			Labels:    labels,
 		},
 		Spec: corev1.ServiceSpec{
-			Selector: labels,
+			ClusterIP: corev1.ClusterIPNone,
+			Selector:  labels,
 			Ports: []corev1.ServicePort{{
 				Name:       "sentinel",
 				Port:       sentinelPort,
@@ -843,6 +844,17 @@ exec redis-server /tmp/redis.conf --appendonly yes --dir /data
 }
 
 func (r *RedisInstanceReconciler) sentinelStartScript(instance *redisv1alpha1.RedisInstance) string {
+	authPassConfig := ""
+	if instance.Spec.Auth != nil && instance.Spec.Auth.PasswordSecretRef != nil {
+		authPassConfig = `
+EOF
+if [ -f /auth/password ]; then
+  REDIS_PASSWORD="$(cat /auth/password)"
+  echo "sentinel auth-pass mymaster ${REDIS_PASSWORD}" >> /tmp/sentinel.conf
+fi
+cat >>/tmp/sentinel.conf <<EOF`
+	}
+
 	tlsConfig := ""
 	if instance.Spec.Auth != nil && instance.Spec.Auth.TLS != nil {
 		tlsConfig = fmt.Sprintf(`
@@ -860,9 +872,10 @@ port %d
 sentinel monitor mymaster %s-0.%s.${POD_NAMESPACE}.svc.cluster.local %d 2
 sentinel resolve-hostnames yes
 %s
+%s
 EOF
 exec redis-sentinel /tmp/sentinel.conf
-`, sentinelPort, instance.Name, instance.Name, redisPort, tlsConfig)
+`, sentinelPort, instance.Name, instance.Name, redisPort, authPassConfig, tlsConfig)
 }
 
 func (r *RedisInstanceReconciler) baseLabels(instance *redisv1alpha1.RedisInstance) map[string]string {
@@ -990,7 +1003,8 @@ func sentinelStatefulSetMatches(actual, desired *appsv1.StatefulSet) bool {
 }
 
 func sentinelServiceMatches(actual *corev1.Service, desired *corev1.Service) bool {
-	return maps.Equal(actual.Spec.Selector, desired.Spec.Selector) &&
+	return actual.Spec.ClusterIP == desired.Spec.ClusterIP &&
+		maps.Equal(actual.Spec.Selector, desired.Spec.Selector) &&
 		reflect.DeepEqual(actual.Spec.Ports, desired.Spec.Ports)
 }
 

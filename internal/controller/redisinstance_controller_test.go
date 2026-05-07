@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,6 +179,9 @@ func TestReconcileCreatesSentinelResourcesAndStatus(t *testing.T) {
 	if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: "sentinel-demo-sentinel", Namespace: namespace.Name}, &svc); err != nil {
 		t.Fatalf("get sentinel service: %v", err)
 	}
+	if svc.Spec.ClusterIP != corev1.ClusterIPNone {
+		t.Fatalf("expected sentinel service to be headless, got clusterIP=%q", svc.Spec.ClusterIP)
+	}
 	var sts appsv1.StatefulSet
 	if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: "sentinel-demo-sentinel", Namespace: namespace.Name}, &sts); err != nil {
 		t.Fatalf("get sentinel statefulset: %v", err)
@@ -204,6 +208,23 @@ func TestReconcileCreatesSentinelResourcesAndStatus(t *testing.T) {
 	}
 	if len(current.Status.SentinelEndpoints) != 2 {
 		t.Fatalf("expected 2 sentinel endpoints, got %d", len(current.Status.SentinelEndpoints))
+	}
+}
+
+func TestSentinelStartScriptIncludesAuthPassWhenPasswordConfigured(t *testing.T) {
+	reconciler := newTestReconciler(t)
+	instance := validRedisInstance("default", "sentinel-auth")
+	instance.Spec.Topology = redisv1alpha1.TopologySentinel
+	instance.Spec.Auth = &redisv1alpha1.RedisAuthSpec{
+		PasswordSecretRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "redis-auth"},
+			Key:                  "password",
+		},
+	}
+
+	script := reconciler.sentinelStartScript(instance)
+	if !strings.Contains(script, `echo "sentinel auth-pass mymaster ${REDIS_PASSWORD}" >> /tmp/sentinel.conf`) {
+		t.Fatalf("expected sentinel auth-pass stanza in script, got:\n%s", script)
 	}
 }
 
