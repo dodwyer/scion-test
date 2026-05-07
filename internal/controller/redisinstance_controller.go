@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"path"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,17 +37,22 @@ const (
 	degradedConditionType           = "Degraded"
 	configChecksumAnnotation        = "redis.example.io/config-checksum"
 	versionChecksumAnnotation       = "redis.example.io/version-checksum"
+	authChecksumAnnotation          = "redis.example.io/auth-checksum"
 	requeueShort                    = 5 * time.Second
 	redisPort                 int32 = 6379
 	sentinelPort              int32 = 26379
 )
 
-// +kubebuilder:rbac:groups=redis.example.io,resources=redisinstances,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=redis.example.io,resources=redisinstances,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=redis.example.io,resources=redisinstances/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=redis.example.io,resources=redisinstances/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=configmaps;services;pods;events;persistentvolumeclaims;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps;services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="coordination.k8s.io",resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="coordination.k8s.io",resources=leases,verbs=get;create;update;patch;delete
 
 type RedisInstanceReconciler struct {
 	client.Client
@@ -73,7 +81,7 @@ func (r *RedisInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	if _, err := r.resolveAuthSecret(ctx, &instance); err != nil {
+	if err := r.resolveSecretReferences(ctx, &instance); err != nil {
 		return r.failInstance(ctx, &instance, "AuthSecretMissing", err.Error())
 	}
 
@@ -99,7 +107,7 @@ func (r *RedisInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if err := r.reconcileSentinelStatefulSet(ctx, &instance); err != nil {
 				return ctrl.Result{}, err
 			}
-		} else if err := r.deleteSentinelResources(ctx, &instance); err != nil {
+		} else if _, err := r.deleteSentinelResources(ctx, &instance); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -126,11 +134,15 @@ func (r *RedisInstanceReconciler) reconcileDelete(ctx context.Context, instance 
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.deleteSentinelResources(ctx, instance); err != nil {
+	if pending, err := r.deleteSentinelResources(ctx, instance); err != nil {
 		return ctrl.Result{}, err
+	} else if pending {
+		return ctrl.Result{RequeueAfter: requeueShort}, nil
 	}
-	if err := r.deleteRedisResources(ctx, instance); err != nil {
+	if pending, err := r.deleteRedisResources(ctx, instance); err != nil {
 		return ctrl.Result{}, err
+	} else if pending {
+		return ctrl.Result{RequeueAfter: requeueShort}, nil
 	}
 	if err := r.deleteOwnedPVCs(ctx, instance); err != nil {
 		return ctrl.Result{}, err
@@ -173,6 +185,9 @@ func (r *RedisInstanceReconciler) requiresMutation(ctx context.Context, instance
 	if !maps.Equal(actualService.Spec.Selector, desiredService.Spec.Selector) || actualService.Spec.ClusterIP != corev1.ClusterIPNone {
 		return true, nil
 	}
+	if !reflect.DeepEqual(actualService.Spec.Ports, desiredService.Spec.Ports) {
+		return true, nil
+	}
 
 	desiredStatefulSet := r.desiredRedisStatefulSet(instance)
 	var actualStatefulSet appsv1.StatefulSet
@@ -194,6 +209,9 @@ func (r *RedisInstanceReconciler) requiresMutation(ctx context.Context, instance
 				return true, nil
 			}
 			return false, err
+		}
+		if !sentinelServiceMatches(&actualSentinelService, desiredSentinelService) {
+			return true, nil
 		}
 
 		desiredSentinelStatefulSet := r.desiredSentinelStatefulSet(instance)
@@ -308,32 +326,48 @@ func (r *RedisInstanceReconciler) reconcileSentinelStatefulSet(ctx context.Conte
 	return r.Patch(ctx, &existing, client.MergeFrom(original))
 }
 
-func (r *RedisInstanceReconciler) deleteSentinelResources(ctx context.Context, instance *redisv1alpha1.RedisInstance) error {
+func (r *RedisInstanceReconciler) deleteSentinelResources(ctx context.Context, instance *redisv1alpha1.RedisInstance) (bool, error) {
+	pending, err := r.deletePodsReverseOrdinal(ctx, instance.Namespace, r.sentinelLabels(instance), instance.Name+"-sentinel")
+	if err != nil {
+		return false, err
+	}
+	if pending {
+		return true, nil
+	}
+
 	service := r.desiredSentinelService(instance)
 	statefulSet := r.desiredSentinelStatefulSet(instance)
 	if err := client.IgnoreNotFound(r.Delete(ctx, service)); err != nil {
-		return err
+		return false, err
 	}
 	if err := client.IgnoreNotFound(r.Delete(ctx, statefulSet)); err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return false, nil
 }
 
-func (r *RedisInstanceReconciler) deleteRedisResources(ctx context.Context, instance *redisv1alpha1.RedisInstance) error {
+func (r *RedisInstanceReconciler) deleteRedisResources(ctx context.Context, instance *redisv1alpha1.RedisInstance) (bool, error) {
+	pending, err := r.deletePodsReverseOrdinal(ctx, instance.Namespace, r.redisPodLabels(instance), instance.Name)
+	if err != nil {
+		return false, err
+	}
+	if pending {
+		return true, nil
+	}
+
 	service := r.desiredHeadlessService(instance)
 	configMap := r.desiredConfigMap(instance)
 	statefulSet := r.desiredRedisStatefulSet(instance)
 	if err := client.IgnoreNotFound(r.Delete(ctx, statefulSet)); err != nil {
-		return err
+		return false, err
 	}
 	if err := client.IgnoreNotFound(r.Delete(ctx, service)); err != nil {
-		return err
+		return false, err
 	}
 	if err := client.IgnoreNotFound(r.Delete(ctx, configMap)); err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return false, nil
 }
 
 func (r *RedisInstanceReconciler) deleteOwnedPVCs(ctx context.Context, instance *redisv1alpha1.RedisInstance) error {
@@ -357,17 +391,43 @@ func (r *RedisInstanceReconciler) deleteOwnedPVCs(ctx context.Context, instance 
 	return nil
 }
 
-func (r *RedisInstanceReconciler) resolveAuthSecret(ctx context.Context, instance *redisv1alpha1.RedisInstance) (*corev1.Secret, error) {
-	if instance.Spec.Auth == nil || instance.Spec.Auth.PasswordSecretRef == nil {
-		return nil, nil
+func (r *RedisInstanceReconciler) resolveSecretReferences(ctx context.Context, instance *redisv1alpha1.RedisInstance) error {
+	if instance.Spec.Auth == nil {
+		return nil
+	}
+
+	if err := r.resolveSecretKeyRef(ctx, instance.Namespace, instance.Spec.Auth.PasswordSecretRef, "password"); err != nil {
+		return err
+	}
+	if instance.Spec.Auth.TLS == nil {
+		return nil
+	}
+	if err := r.resolveSecretKeyRef(ctx, instance.Namespace, instance.Spec.Auth.TLS.CertSecretRef, "tls cert"); err != nil {
+		return err
+	}
+	if err := r.resolveSecretKeyRef(ctx, instance.Namespace, instance.Spec.Auth.TLS.KeySecretRef, "tls key"); err != nil {
+		return err
+	}
+	if err := r.resolveSecretKeyRef(ctx, instance.Namespace, instance.Spec.Auth.TLS.CASecretRef, "tls ca"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *RedisInstanceReconciler) resolveSecretKeyRef(ctx context.Context, namespace string, ref *corev1.SecretKeySelector, description string) error {
+	if ref == nil {
+		return nil
 	}
 
 	var secret corev1.Secret
-	key := types.NamespacedName{Name: instance.Spec.Auth.PasswordSecretRef.Name, Namespace: instance.Namespace}
+	key := types.NamespacedName{Name: ref.Name, Namespace: namespace}
 	if err := r.Get(ctx, key, &secret); err != nil {
-		return nil, fmt.Errorf("password secret %s/%s: %w", instance.Namespace, instance.Spec.Auth.PasswordSecretRef.Name, err)
+		return fmt.Errorf("%s secret %s/%s: %w", description, namespace, ref.Name, err)
 	}
-	return &secret, nil
+	if _, ok := secret.Data[ref.Key]; !ok {
+		return fmt.Errorf("%s secret %s/%s missing key %q", description, namespace, ref.Name, ref.Key)
+	}
+	return nil
 }
 
 func (r *RedisInstanceReconciler) failInstance(ctx context.Context, instance *redisv1alpha1.RedisInstance, reason, message string) (ctrl.Result, error) {
@@ -559,6 +619,7 @@ func (r *RedisInstanceReconciler) desiredRedisStatefulSet(instance *redisv1alpha
 	templateAnnotations := map[string]string{
 		configChecksumAnnotation:  checksum(renderRedisConfig(instance.Spec.Config)),
 		versionChecksumAnnotation: checksum(instance.Spec.RedisVersion),
+		authChecksumAnnotation:    checksum(authSpecChecksum(instance.Spec.Auth)),
 	}
 
 	runAsUser := int64(1001)
@@ -573,14 +634,20 @@ func (r *RedisInstanceReconciler) desiredRedisStatefulSet(instance *redisv1alpha
 		{Name: "SERVICE_NAME", Value: instance.Name},
 		{Name: "REDIS_TOPOLOGY", Value: instance.Spec.Topology},
 	}
-	if instance.Spec.Auth != nil && instance.Spec.Auth.PasswordSecretRef != nil {
-		env = append(env, corev1.EnvVar{
-			Name: "REDIS_PASSWORD",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: instance.Spec.Auth.PasswordSecretRef,
+	volumes := []corev1.Volume{{
+		Name: "config",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: instance.Name + "-config"},
+				DefaultMode:          ptr(int32(0755)),
 			},
-		})
+		},
+	}}
+	volumeMounts := []corev1.VolumeMount{
+		{Name: "config", MountPath: "/config"},
+		{Name: "data", MountPath: "/data"},
 	}
+	volumes, volumeMounts = appendAuthVolumes(instance, volumes, volumeMounts)
 
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -627,20 +694,9 @@ func (r *RedisInstanceReconciler) desiredRedisStatefulSet(instance *redisv1alpha
 								Drop: []corev1.Capability{"ALL"},
 							},
 						},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "config", MountPath: "/config"},
-							{Name: "data", MountPath: "/data"},
-						},
+						VolumeMounts: volumeMounts,
 					}},
-					Volumes: []corev1.Volume{{
-						Name: "config",
-						VolumeSource: corev1.VolumeSource{
-							ConfigMap: &corev1.ConfigMapVolumeSource{
-								LocalObjectReference: corev1.LocalObjectReference{Name: instance.Name + "-config"},
-								DefaultMode:          ptr(int32(0755)),
-							},
-						},
-					}},
+					Volumes: volumes,
 				},
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
@@ -689,6 +745,17 @@ func (r *RedisInstanceReconciler) desiredSentinelStatefulSet(instance *redisv1al
 	runAsUser := int64(1001)
 	runAsGroup := int64(1001)
 	fsGroup := int64(1001)
+	volumes := []corev1.Volume{{
+		Name: "config",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: instance.Name + "-config"},
+				DefaultMode:          ptr(int32(0755)),
+			},
+		},
+	}}
+	volumeMounts := []corev1.VolumeMount{{Name: "config", MountPath: "/config"}}
+	volumes, volumeMounts = appendAuthVolumes(instance, volumes, volumeMounts)
 
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -727,17 +794,9 @@ func (r *RedisInstanceReconciler) desiredSentinelStatefulSet(instance *redisv1al
 								Drop: []corev1.Capability{"ALL"},
 							},
 						},
-						VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/config"}},
+						VolumeMounts: volumeMounts,
 					}},
-					Volumes: []corev1.Volume{{
-						Name: "config",
-						VolumeSource: corev1.VolumeSource{
-							ConfigMap: &corev1.ConfigMapVolumeSource{
-								LocalObjectReference: corev1.LocalObjectReference{Name: instance.Name + "-config"},
-								DefaultMode:          ptr(int32(0755)),
-							},
-						},
-					}},
+					Volumes: volumes,
 				},
 			},
 		},
@@ -747,6 +806,29 @@ func (r *RedisInstanceReconciler) desiredSentinelStatefulSet(instance *redisv1al
 }
 
 func (r *RedisInstanceReconciler) redisStartScript(instance *redisv1alpha1.RedisInstance) string {
+	passwordConfig := ""
+	if instance.Spec.Auth != nil && instance.Spec.Auth.PasswordSecretRef != nil {
+		passwordConfig = `
+if [ -f /auth/password ]; then
+  REDIS_PASSWORD="$(cat /auth/password)"
+  echo "requirepass ${REDIS_PASSWORD}" >> /tmp/redis.conf
+  echo "masterauth ${REDIS_PASSWORD}" >> /tmp/redis.conf
+fi`
+	}
+
+	tlsConfig := ""
+	if instance.Spec.Auth != nil && instance.Spec.Auth.TLS != nil {
+		tlsConfig = fmt.Sprintf(`
+cat >> /tmp/redis.conf <<EOF
+port 0
+tls-port %d
+tls-cert-file /tls/cert/tls.crt
+tls-key-file /tls/key/tls.key
+tls-ca-cert-file /tls/ca/ca.crt
+tls-replication yes
+EOF`, redisPort)
+	}
+
 	return fmt.Sprintf(`#!/bin/sh
 set -eu
 cp /config/redis.conf /tmp/redis.conf
@@ -754,24 +836,33 @@ ordinal="${POD_NAME##*-}"
 if [ "${REDIS_TOPOLOGY}" = "standalone" ] && [ "${ordinal}" != "0" ]; then
   echo "replicaof %s-0.%s.${POD_NAMESPACE}.svc.cluster.local %d" >> /tmp/redis.conf
 fi
-if [ -n "${REDIS_PASSWORD:-}" ]; then
-  echo "requirepass ${REDIS_PASSWORD}" >> /tmp/redis.conf
-  echo "masterauth ${REDIS_PASSWORD}" >> /tmp/redis.conf
-fi
+%s
+%s
 exec redis-server /tmp/redis.conf --appendonly yes --dir /data
-`, instance.Name, instance.Name, redisPort)
+`, instance.Name, instance.Name, redisPort, passwordConfig, tlsConfig)
 }
 
 func (r *RedisInstanceReconciler) sentinelStartScript(instance *redisv1alpha1.RedisInstance) string {
+	tlsConfig := ""
+	if instance.Spec.Auth != nil && instance.Spec.Auth.TLS != nil {
+		tlsConfig = fmt.Sprintf(`
+tls-port %d
+port 0
+tls-cert-file /tls/cert/tls.crt
+tls-key-file /tls/key/tls.key
+tls-ca-cert-file /tls/ca/ca.crt`, sentinelPort)
+	}
+
 	return fmt.Sprintf(`#!/bin/sh
 set -eu
 cat >/tmp/sentinel.conf <<EOF
 port %d
 sentinel monitor mymaster %s-0.%s.${POD_NAMESPACE}.svc.cluster.local %d 2
 sentinel resolve-hostnames yes
+%s
 EOF
 exec redis-sentinel /tmp/sentinel.conf
-`, sentinelPort, instance.Name, instance.Name, redisPort)
+`, sentinelPort, instance.Name, instance.Name, redisPort, tlsConfig)
 }
 
 func (r *RedisInstanceReconciler) baseLabels(instance *redisv1alpha1.RedisInstance) map[string]string {
@@ -800,20 +891,135 @@ func checksum(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func authSpecChecksum(auth *redisv1alpha1.RedisAuthSpec) string {
+	if auth == nil {
+		return ""
+	}
+
+	var parts []string
+	if auth.PasswordSecretRef != nil {
+		parts = append(parts, fmt.Sprintf("password:%s/%s", auth.PasswordSecretRef.Name, auth.PasswordSecretRef.Key))
+	}
+	if auth.TLS != nil {
+		parts = append(parts, secretRefChecksum("tls-cert", auth.TLS.CertSecretRef))
+		parts = append(parts, secretRefChecksum("tls-key", auth.TLS.KeySecretRef))
+		parts = append(parts, secretRefChecksum("tls-ca", auth.TLS.CASecretRef))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "|")
+}
+
+func secretRefChecksum(prefix string, ref *corev1.SecretKeySelector) string {
+	if ref == nil {
+		return prefix + ":"
+	}
+	return fmt.Sprintf("%s:%s/%s", prefix, ref.Name, ref.Key)
+}
+
+func appendAuthVolumes(instance *redisv1alpha1.RedisInstance, volumes []corev1.Volume, mounts []corev1.VolumeMount) ([]corev1.Volume, []corev1.VolumeMount) {
+	if instance.Spec.Auth == nil {
+		return volumes, mounts
+	}
+
+	if ref := instance.Spec.Auth.PasswordSecretRef; ref != nil {
+		volumes = append(volumes, corev1.Volume{
+			Name: "auth",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: ref.Name,
+					Items: []corev1.KeyToPath{{
+						Key:  ref.Key,
+						Path: "password",
+					}},
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "auth", MountPath: "/auth", ReadOnly: true})
+	}
+
+	if tls := instance.Spec.Auth.TLS; tls != nil {
+		if tls.CertSecretRef != nil {
+			volumes = append(volumes, secretVolume("tls-cert", tls.CertSecretRef, "tls.crt"))
+			mounts = append(mounts, corev1.VolumeMount{Name: "tls-cert", MountPath: path.Dir("/tls/cert/tls.crt"), ReadOnly: true})
+		}
+		if tls.KeySecretRef != nil {
+			volumes = append(volumes, secretVolume("tls-key", tls.KeySecretRef, "tls.key"))
+			mounts = append(mounts, corev1.VolumeMount{Name: "tls-key", MountPath: path.Dir("/tls/key/tls.key"), ReadOnly: true})
+		}
+		if tls.CASecretRef != nil {
+			volumes = append(volumes, secretVolume("tls-ca", tls.CASecretRef, "ca.crt"))
+			mounts = append(mounts, corev1.VolumeMount{Name: "tls-ca", MountPath: path.Dir("/tls/ca/ca.crt"), ReadOnly: true})
+		}
+	}
+
+	return volumes, mounts
+}
+
+func secretVolume(name string, ref *corev1.SecretKeySelector, fileName string) corev1.Volume {
+	return corev1.Volume{
+		Name: name,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: ref.Name,
+				Items: []corev1.KeyToPath{{
+					Key:  ref.Key,
+					Path: fileName,
+				}},
+			},
+		},
+	}
+}
+
 func ptr[T any](value T) *T {
 	return &value
 }
 
 func redisStatefulSetMatches(actual, desired *appsv1.StatefulSet) bool {
 	return *actual.Spec.Replicas == *desired.Spec.Replicas &&
-		actual.Spec.Template.Spec.Containers[0].Image == desired.Spec.Template.Spec.Containers[0].Image &&
-		actual.Spec.Template.Annotations[configChecksumAnnotation] == desired.Spec.Template.Annotations[configChecksumAnnotation] &&
-		actual.Spec.Template.Annotations[versionChecksumAnnotation] == desired.Spec.Template.Annotations[versionChecksumAnnotation]
+		actual.Spec.ServiceName == desired.Spec.ServiceName &&
+		apiequality.Semantic.DeepEqual(actual.Spec.Selector, desired.Spec.Selector) &&
+		apiequality.Semantic.DeepEqual(actual.Spec.Template, desired.Spec.Template) &&
+		apiequality.Semantic.DeepEqual(actual.Spec.VolumeClaimTemplates, desired.Spec.VolumeClaimTemplates)
 }
 
 func sentinelStatefulSetMatches(actual, desired *appsv1.StatefulSet) bool {
 	return *actual.Spec.Replicas == *desired.Spec.Replicas &&
-		actual.Spec.Template.Spec.Containers[0].Image == desired.Spec.Template.Spec.Containers[0].Image
+		actual.Spec.ServiceName == desired.Spec.ServiceName &&
+		apiequality.Semantic.DeepEqual(actual.Spec.Selector, desired.Spec.Selector) &&
+		apiequality.Semantic.DeepEqual(actual.Spec.Template, desired.Spec.Template)
+}
+
+func sentinelServiceMatches(actual *corev1.Service, desired *corev1.Service) bool {
+	return maps.Equal(actual.Spec.Selector, desired.Spec.Selector) &&
+		reflect.DeepEqual(actual.Spec.Ports, desired.Spec.Ports)
+}
+
+func (r *RedisInstanceReconciler) deletePodsReverseOrdinal(ctx context.Context, namespace string, labels map[string]string, prefix string) (bool, error) {
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList, client.InNamespace(namespace), client.MatchingLabels(labels)); err != nil {
+		return false, err
+	}
+
+	sort.Slice(podList.Items, func(i, j int) bool {
+		left, _ := podOrdinal(podList.Items[i].Name, prefix)
+		right, _ := podOrdinal(podList.Items[j].Name, prefix)
+		return left > right
+	})
+
+	pending := false
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		if pod.DeletionTimestamp != nil {
+			pending = true
+			continue
+		}
+		if err := client.IgnoreNotFound(r.Delete(ctx, pod)); err != nil {
+			return false, err
+		}
+		pending = true
+	}
+
+	return pending, nil
 }
 
 func (r *RedisInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {

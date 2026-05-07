@@ -8,10 +8,6 @@ rules:
   - ""
   resources:
   - configmaps
-  - events
-  - persistentvolumeclaims
-  - pods
-  - secrets
   - services
   verbs:
   - create
@@ -20,6 +16,31 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  - pods
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - apps
@@ -41,17 +62,13 @@ rules:
   - create
   - delete
   - get
-  - list
   - patch
   - update
-  - watch
 - apiGroups:
   - redis.example.io
   resources:
   - redisinstances
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch

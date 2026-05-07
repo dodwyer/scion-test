@@ -49,7 +49,7 @@
 - [x] Define `ClusterRoleBinding` manifest
 - [x] Implement Secret reference resolution for `spec.auth.passwordSecretRef`
 - [x] Allow reconcile to proceed without auth when `spec.auth.passwordSecretRef` is unset
-- [ ] Implement optional TLS configuration via `spec.auth.tls` Secret reference
+- [x] Implement optional TLS configuration via `spec.auth.tls` Secret reference
 - [x] Configure pod security context to run as non-root
 - [x] Configure pod security context with a read-only root filesystem
 - [x] Configure pod security context with dropped Linux capabilities
