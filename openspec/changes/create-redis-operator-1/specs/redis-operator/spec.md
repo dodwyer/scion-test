@@ -162,6 +162,12 @@ Given a `Redis` CR that has already been fully reconciled,
 When the reconciler runs again with no spec change,
 Then no resources are created, updated, or deleted.
 
+#### Scenario: Operator restart re-reconciles existing CRs
+
+Given a `Redis` CR exists and is fully reconciled,
+When the operator pod restarts,
+Then on startup the controller re-enqueues all existing `Redis` CRs, reconciles them, and converges to the same state without creating duplicate resources.
+
 ---
 
 ### Requirement: Observability

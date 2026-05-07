@@ -23,7 +23,7 @@ User → Redis CR → Operator Controller → Owned Resources
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `version` | string | yes | Redis image version (e.g. `7.2`) |
-| `replicas` | int32 | no | Number of replicas (default: 1) |
+| `replicas` | int32 | no | Number of replicas (default: 1; kubebuilder marker: `+kubebuilder:default=1`) |
 | `resources` | ResourceRequirements | no | CPU/memory requests and limits |
 | `persistence.enabled` | bool | no | Enable PVC-backed storage (default: false) |
 | `persistence.storageClassName` | string | no | StorageClass name for PVC |
@@ -116,7 +116,11 @@ The operator requires a `ClusterRole` (or `Role` for namespace-scoped) with thes
 
 - Operator runs as a `Deployment` with 1 replica (leader election allows scaling to 2)
 - Namespace: `redis-system` (recommended)
-- Image: published to container registry
+- Image: published to container registry; operator Dockerfile packages the compiled Go binary on `gcr.io/distroless/static`
+
+## Watch Scope
+
+By default the operator watches **all namespaces** (`ctrl.Manager` configured with empty `Namespace` field). Deployment-time override: set `WATCH_NAMESPACE` environment variable on the operator pod to restrict to a single namespace.
 
 ## Update Strategy
 

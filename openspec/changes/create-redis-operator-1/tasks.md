@@ -37,6 +37,7 @@
 - [ ] Define resource requests/limits for operator container
 - [ ] Write Namespace manifest for `redis-system`
 - [ ] Write Kustomize base or Helm chart skeleton
+- [ ] Write operator Dockerfile (distroless base image, compiled Go binary)
 
 ## Observability
 
