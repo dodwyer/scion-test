@@ -159,9 +159,44 @@ func (r *RedisInstanceReconciler) handleDeletion(ctx context.Context, instance *
 		}
 	}
 
-	// 2. Delete the Redis StatefulSet (controller deletes pods in reverse ordinal order).
+	// 2. Scale down Redis pods one at a time in reverse ordinal order before deleting the StatefulSet.
 	redisSS := &appsv1.StatefulSet{}
-	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, redisSS); err == nil {
+	ssKey := types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}
+	if err := r.Get(ctx, ssKey, redisSS); err == nil {
+		currentReplicas := int32(0)
+		if redisSS.Spec.Replicas != nil {
+			currentReplicas = *redisSS.Spec.Replicas
+		}
+
+		// Count active (non-terminating) Redis pods to detect in-progress scale-down.
+		podList := &corev1.PodList{}
+		if err := r.List(ctx, podList, client.InNamespace(instance.Namespace),
+			client.MatchingLabels(redisLabels(instance.Name))); err != nil {
+			return ctrl.Result{}, err
+		}
+		activePods := int32(0)
+		for i := range podList.Items {
+			if podList.Items[i].DeletionTimestamp.IsZero() {
+				activePods++
+			}
+		}
+
+		// If a previous scale-down step is still in progress (pods terminating), wait.
+		if activePods > currentReplicas {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
+		if currentReplicas > 0 {
+			// Scale down by one — Kubernetes deletes the highest-ordinal pod first.
+			newReplicas := currentReplicas - 1
+			redisSS.Spec.Replicas = &newReplicas
+			if err := r.Update(ctx, redisSS); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
+		// All pods scaled to zero, now delete the StatefulSet itself.
 		if err := r.Delete(ctx, redisSS); client.IgnoreNotFound(err) != nil {
 			return ctrl.Result{}, err
 		}
@@ -326,6 +361,8 @@ func (r *RedisInstanceReconciler) reconcileStatefulSet(ctx context.Context, inst
 // buildRedisPodTemplate constructs the pod template for Redis StatefulSet pods.
 // Ordinal 0 starts as standalone primary; pods with ordinal > 0 are configured as
 // replicas via a startup script that reads the pod hostname.
+// For sentinel topology, non-zero replicas query the Sentinel service to discover
+// the current primary so they follow the Sentinel-managed master after failover.
 func buildRedisPodTemplate(instance *redisv1alpha1.RedisInstance, restartHash string) corev1.PodTemplateSpec {
 	labels := redisLabels(instance.Name)
 
@@ -391,18 +428,44 @@ func buildRedisPodTemplate(instance *redisv1alpha1.RedisInstance, restartHash st
 		annotationRestartHash: restartHash,
 	}
 
-	// Startup script: ordinal 0 is the primary; ordinal > 0 connects as a replica.
-	// Both standalone and sentinel topologies use the same primary-plus-replicas model.
+	var startCmd string
 	masterDNS := fmt.Sprintf("%s-0.%s.%s.svc.cluster.local", instance.Name, instance.Name, instance.Namespace)
-	startCmd := fmt.Sprintf(
-		`ORDINAL=$(hostname | rev | cut -d- -f1 | rev); `+
-			`if [ "$ORDINAL" -eq "0" ]; then `+
-			`exec redis-server /etc/redis/redis.conf; `+
-			`else `+
-			`exec redis-server /etc/redis/redis.conf --replicaof %s %d; `+
-			`fi`,
-		masterDNS, redisPort,
-	)
+
+	if instance.Spec.Topology == redisv1alpha1.TopologySentinel {
+		// For sentinel topology, non-zero replicas query the Sentinel service to discover
+		// the current primary. This allows replicas to follow the Sentinel-managed master
+		// after a failover rather than blindly connecting to a hard-coded pod-0 address.
+		// If Sentinel is not yet available (initial bootstrap), fall back to ordinal-0.
+		sentinelSvc := fmt.Sprintf("%s-sentinel.%s.svc.cluster.local", instance.Name, instance.Namespace)
+		startCmd = fmt.Sprintf(
+			`ORDINAL=$(hostname | rev | cut -d- -f1 | rev); `+
+				`if [ "$ORDINAL" -eq "0" ]; then `+
+				`exec redis-server /etc/redis/redis.conf; `+
+				`else `+
+				`MASTER_HOST=$(redis-cli -h %s -p %d SENTINEL get-master-addr-by-name mymaster 2>/dev/null | head -1); `+
+				`if [ -n "$MASTER_HOST" ]; then `+
+				`MASTER_PORT=$(redis-cli -h %s -p %d SENTINEL get-master-addr-by-name mymaster 2>/dev/null | tail -1); `+
+				`exec redis-server /etc/redis/redis.conf --replicaof "$MASTER_HOST" "$MASTER_PORT"; `+
+				`else `+
+				`exec redis-server /etc/redis/redis.conf --replicaof %s %d; `+
+				`fi; `+
+				`fi`,
+			sentinelSvc, sentinelPort,
+			sentinelSvc, sentinelPort,
+			masterDNS, redisPort,
+		)
+	} else {
+		// Standalone topology: ordinal 0 is always the writable primary.
+		startCmd = fmt.Sprintf(
+			`ORDINAL=$(hostname | rev | cut -d- -f1 | rev); `+
+				`if [ "$ORDINAL" -eq "0" ]; then `+
+				`exec redis-server /etc/redis/redis.conf; `+
+				`else `+
+				`exec redis-server /etc/redis/redis.conf --replicaof %s %d; `+
+				`fi`,
+			masterDNS, redisPort,
+		)
+	}
 
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -634,15 +697,18 @@ func (r *RedisInstanceReconciler) updateStatus(ctx context.Context, instance *re
 		}
 
 		// For standalone topology the primary is always ordinal 0.
-		// For sentinel topology the primary can change after failover, so we leave
-		// masterEndpoint empty and let clients discover it through Sentinel.
+		// For sentinel topology, report the Sentinel service endpoint so clients can
+		// query it for the current primary via the SENTINEL protocol.
 		if instance.Spec.Topology != redisv1alpha1.TopologySentinel {
 			instance.Status.MasterEndpoint = fmt.Sprintf(
 				"%s-0.%s.%s.svc.cluster.local",
 				instance.Name, instance.Name, instance.Namespace,
 			)
 		} else {
-			instance.Status.MasterEndpoint = ""
+			instance.Status.MasterEndpoint = fmt.Sprintf(
+				"%s-sentinel.%s.svc.cluster.local:%d",
+				instance.Name, instance.Namespace, sentinelPort,
+			)
 		}
 	}
 
