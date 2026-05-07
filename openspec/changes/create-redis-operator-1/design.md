@@ -16,11 +16,11 @@ The Redis Kubernetes Operator is a Go-based controller built with controller-run
 | Field | Type | Description |
 |-------|------|-------------|
 | `replicas` | `int32` | Number of Redis replicas |
-| `redisVersion` | `string` | Redis container image tag (e.g., `"7.2"`) |
+| `redisVersion` | `string` | Redis container image tag or digest (e.g., `"redis:7.2"`); any registry is allowed |
 | `storage` | `PersistentVolumeClaimTemplate` | PVC template for data volumes |
 | `resources` | `ResourceRequirements` | CPU and memory requests/limits |
 | `config` | `map[string]string` | redis.conf key/value overrides |
-| `auth.passwordSecretRef` | `SecretKeySelector` | Reference to Secret holding the Redis password |
+| `auth.passwordSecretRef` | `SecretKeySelector` | Optional reference to Secret holding the Redis password; if omitted, Redis runs without auth |
 | `auth.tls` | `TLSConfig` | Optional TLS certificate configuration |
 | `topology` | `string` | `standalone` or `sentinel` |
 
@@ -30,9 +30,22 @@ The Redis Kubernetes Operator is a Go-based controller built with controller-run
 |-------|------|-------------|
 | `phase` | `string` | `Pending`, `Running`, `Degraded`, or `Failed` |
 | `conditions` | `[]metav1.Condition` | Standard Kubernetes condition array |
+| `observedGeneration` | `int64` | Latest `.metadata.generation` that has been reconciled and reflected in status |
 | `readyReplicas` | `int32` | Count of ready replicas |
 | `masterEndpoint` | `string` | DNS name of the current master |
 | `sentinelEndpoints` | `[]string` | DNS names of Sentinel instances (sentinel topology only) |
+
+#### Topology and Replication Model
+
+- V1 supports only `standalone` and `sentinel` topologies. Redis Cluster is explicitly out of scope.
+- `spec.replicas` defines the total number of Redis data pods managed by the operator.
+- The operator maintains exactly one writable primary and `spec.replicas - 1` read replicas.
+- For `topology: standalone`, the primary is the ordinal `0` pod and every higher ordinal pod is configured to replicate from that primary.
+- For `topology: sentinel`, Sentinel is responsible for primary discovery and failover. Redis data pods still run in a single StatefulSet, and replicas follow the primary advertised by the Sentinel quorum.
+- `status.masterEndpoint` reports the currently writable primary endpoint for both supported topologies.
+- `spec.storage` is mandatory in v1 and must be backed by a PVC template. Ephemeral storage modes such as `emptyDir` are out of scope.
+- Authentication is optional in v1. When `auth.passwordSecretRef` is unset, the operator configures Redis without password auth.
+- V1 does not maintain a Redis-version allowlist. Users provide a pullable Redis image reference, and the operator treats that reference as the desired runtime image.
 
 ## Controller Architecture
 
@@ -43,12 +56,12 @@ The controller watches `RedisInstance` CR events (create, update, delete) and ru
 1. Fetch the `RedisInstance` CR; return if not found (deleted without finalizer).
 2. Add finalizer `redis.example.io/cleanup` if absent.
 3. If deletion timestamp is set, run ordered teardown and remove finalizer.
-4. Gate on `observedGeneration == generation`; skip reconcile if already current.
+4. Inspect owned resources. If `status.observedGeneration == metadata.generation` and all required owned resources exist, skip resource mutation and proceed only with status/event reconciliation as needed. If any required owned resource is missing or drifted, continue with full reconcile even when the generation is current.
 5. Reconcile ConfigMap from `spec.config`.
 6. Reconcile headless Service.
 7. Reconcile StatefulSet (image, replicas, volume mounts, resource limits).
 8. If `spec.topology == sentinel`, reconcile Sentinel StatefulSet and Service.
-9. Update `status` subresource (phase, conditions, readyReplicas, endpoints).
+9. Update `status` subresource (`phase`, `conditions`, `observedGeneration`, `readyReplicas`, endpoints).
 10. Emit Kubernetes Events on phase transitions.
 
 All steps are idempotent: safe to re-run on any event.
@@ -66,7 +79,13 @@ All steps are idempotent: safe to re-run on any event.
 ### Scaling
 
 - **Scale-up**: Increase `spec.replicas`; StatefulSet controller adds pods.
-- **Scale-down**: Cordon target replicas (remove from service endpoints), drain replication lag to zero, then reduce `spec.replicas`.
+- **Scale-down**:
+  1. Update the Redis StatefulSet `.spec.replicas` to the desired lower count.
+  2. Wait for the highest-ordinal pods above the new replica count to terminate successfully.
+  3. Reconcile the headless Service selector so it continues to match only the remaining operator-managed pods.
+  4. During CR deletion, rely on the finalizer to delete PVCs that belonged to removed pods before removing the finalizer.
+
+Scale-down in normal reconciliation does not delete PVCs for retained StatefulSet ordinals; PVC cleanup is only guaranteed during finalizer-driven teardown.
 
 ### Rolling Restart
 
@@ -77,7 +96,7 @@ Triggered when `spec.redisVersion` or `spec.config` changes. The StatefulSet upd
 On deletion, the finalizer ensures:
 1. Sentinel instances are stopped (if applicable).
 2. Redis replicas are shut down in reverse ordinal order.
-3. PVCs are retained or deleted per a retention policy (TBD — see open questions).
+3. Owned PVCs are deleted by default before finalizer removal.
 4. Finalizer is removed, allowing the CR to be garbage collected.
 
 ### Leader Election
@@ -100,6 +119,7 @@ Credentials (passwords, TLS certs) are referenced by Secret name and key; they a
 
 - Kubernetes Events emitted on phase transitions (e.g., `Pending → Running`, `Running → Degraded`).
 - `status.conditions` array follows standard Kubernetes condition conventions (`Ready`, `Reconciling`, `Degraded`).
+- `status.observedGeneration` is updated whenever the operator has inspected the latest desired spec and reconciled or confirmed owned resources for that generation.
 - Controller exposes Prometheus metrics via the controller-runtime metrics endpoint (default port 8080).
 
 ## Security Considerations
@@ -108,41 +128,13 @@ Credentials (passwords, TLS certs) are referenced by Secret name and key; they a
 - TLS termination configurable via `spec.auth.tls`; certificates referenced from Secrets.
 - Pod security: non-root user, read-only root filesystem, dropped capabilities.
 - Network policy: restrict inter-pod Redis traffic to operator-managed labels.
+- V1 does not inject a Redis exporter sidecar; metrics beyond controller-runtime defaults are out of scope.
 
 ---
 
-## Open Questions
+## Implementation Constraints
 
-The following questions must be resolved by stakeholders before implementation begins. Answers will update this design document.
-
-**OQ-1 — Cluster Topology Scope**  
-Must Redis Cluster mode be supported in v1, or is standalone + Sentinel sufficient? Redis Cluster requires sharding logic and a significantly different reconcile path.  
-*Default assumption*: standalone + Sentinel only for v1.
-
-**OQ-2 — Supported Redis Versions**  
-Which Redis major versions must be supported: 6.x, 7.x, or both? The operator must validate `spec.redisVersion` against a supported list.  
-*Default assumption*: 7.x; 6.x support deferred.
-
-**OQ-3 — Storage Optionality**  
-Is PVC-backed storage mandatory, or should the operator support `emptyDir` for dev/test scenarios? Allowing `emptyDir` requires a storage mode discriminator in the spec.  
-*Default assumption*: PVC mandatory; `emptyDir` added as a follow-on.
-
-**OQ-4 — Namespace Scope**  
-Should the `RedisInstance` CRD be namespace-scoped (operator watches one or all namespaces) or cluster-scoped? Namespace-scoped is simpler; cluster-scoped complicates RBAC.  
-*Default assumption*: namespace-scoped.
-
-**OQ-5 — Authentication Policy**  
-Is authentication (password) mandatory on every `RedisInstance`, or optional? Mandating auth simplifies security posture but breaks unauthenticated dev workflows.  
-*Default assumption*: optional; security policy enforced at admission webhook level (future work).
-
-**OQ-6 — Backup and Restore**  
-Should v1 include backup/restore support (e.g., scheduled RDB snapshots to object storage)? This significantly expands scope.  
-*Default assumption*: out of scope for v1; re-evaluate in v2.
-
-**OQ-7 — Redis Exporter Sidecar**  
-Should the operator automatically inject a `redis_exporter` sidecar for Prometheus metrics scraping, or leave that to the user?  
-*Default assumption*: optional, controlled by `spec.monitoring.enabled` flag (not implemented in v1 unless OQ resolved in favor).
-
-**OQ-8 — Kubernetes Version Floor**  
-What is the minimum supported Kubernetes version? This determines which API versions and features are available (e.g., Server-Side Apply requires 1.22+, StatefulSet minReadySeconds requires 1.25+).  
-*Default assumption*: 1.24.
+- Minimum supported Kubernetes version is 1.26.
+- The CRD is namespace-scoped and reconciles namespaced resources only.
+- Backup and restore remain out of scope for v1.
+- No image registry restrictions are imposed by the operator beyond standard Kubernetes image pull behavior.

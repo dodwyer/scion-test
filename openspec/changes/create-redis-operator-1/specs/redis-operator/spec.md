@@ -31,6 +31,18 @@ Given a `RedisInstance` CR with no `spec.storage` field,
 When the CR is submitted to the Kubernetes API server,  
 Then the API server rejects it with a validation error indicating `spec.storage` is required.
 
+#### Scenario: Status schema includes observed generation
+
+Given the `RedisInstance` CRD status schema,  
+When the schema is inspected,  
+Then it includes `status.observedGeneration` as an integer field alongside `phase`, `conditions`, `readyReplicas`, `masterEndpoint`, and `sentinelEndpoints`.
+
+#### Scenario: Kubernetes version floor is documented
+
+Given the operator compatibility contract,  
+When the implementation prerequisites are reviewed,  
+Then the minimum supported Kubernetes version is `1.26`.
+
 ---
 
 ### Requirement: Reconcile Loop Idempotency
@@ -43,11 +55,17 @@ Given a `RedisInstance` CR that has already been fully reconciled (status.phase 
 When the operator receives a no-op watch event and runs reconcile again,  
 Then no owned resources are modified and `status.observedGeneration` equals `metadata.generation`.
 
-#### Scenario: Generation gate skips reconcile when already current
+#### Scenario: Generation gate skips only when resources are already present
 
-Given a `RedisInstance` CR where `status.observedGeneration` equals `metadata.generation`,  
+Given a `RedisInstance` CR where `status.observedGeneration` equals `metadata.generation` and all required owned resources already exist,  
 When the operator enters the reconcile function,  
-Then the operator returns early without modifying any owned resource.
+Then the operator may skip resource mutation work and only refresh status or events if needed.
+
+#### Scenario: Generation gate does not block drift correction
+
+Given a `RedisInstance` CR where `status.observedGeneration` equals `metadata.generation` but an owned StatefulSet or Service is missing or drifted,  
+When the operator reconciles the CR,  
+Then the operator recreates or corrects the owned resource instead of returning early.
 
 ---
 
@@ -72,6 +90,30 @@ Then the StatefulSet pod template image tag is updated to `7.2` and a rolling re
 Given a StatefulSet owned by a `RedisInstance` that is modified out-of-band (e.g., replicas manually changed),  
 When the operator next reconciles the CR,  
 Then the StatefulSet is restored to match `spec.replicas`.
+
+---
+
+### Requirement: Replication Topology Contract
+
+The operator MUST interpret `spec.replicas` as the total count of Redis data pods and MUST maintain one writable primary plus `N-1` read replicas for every supported topology.
+
+#### Scenario: Standalone topology uses ordinal zero as writable primary
+
+Given a `RedisInstance` CR with `spec.topology: standalone` and `spec.replicas: 3`,  
+When the operator configures the Redis StatefulSet,  
+Then pod ordinal `0` is configured as the writable primary and pod ordinals `1` and `2` are configured as read replicas of that primary.
+
+#### Scenario: Sentinel topology uses Sentinel for master discovery
+
+Given a `RedisInstance` CR with `spec.topology: sentinel` and `spec.replicas: 3`,  
+When the operator configures Redis and Sentinel resources,  
+Then exactly one Redis pod is writable, the remaining Redis pods are read replicas, and Sentinel advertises the current primary for replica discovery and failover.
+
+#### Scenario: Redis Cluster topology is rejected
+
+Given a `RedisInstance` CR with `spec.topology: cluster`,  
+When the CR is submitted to the Kubernetes API server,  
+Then the API server rejects it because Redis Cluster is out of scope for v1.
 
 ---
 
@@ -145,11 +187,23 @@ Given a `RedisInstance` CR currently at `spec.replicas: 1`,
 When `spec.replicas` is updated to `3`,  
 Then the operator updates the StatefulSet to 3 replicas and `status.readyReplicas` reaches 3.
 
-#### Scenario: Scale-down cordons before termination
+#### Scenario: Scale-down updates the StatefulSet replica count
 
 Given a `RedisInstance` CR at `spec.replicas: 3`,  
 When `spec.replicas` is updated to `1`,  
-Then the operator cordons the highest-ordinal replicas (removes them from service), verifies replication drain, and then reduces the StatefulSet replica count to 1.
+Then the operator updates the Redis StatefulSet `.spec.replicas` to `1`.
+
+#### Scenario: Scale-down waits for higher ordinals to terminate
+
+Given a `RedisInstance` CR whose Redis StatefulSet has been reduced from `3` replicas to `1`,  
+When the operator observes the scale-down in progress,  
+Then it waits until pods `<cr-name>-1` and `<cr-name>-2` have terminated before reporting the instance fully reconciled.
+
+#### Scenario: Headless Service continues to select remaining pods after scale-down
+
+Given a `RedisInstance` CR scaled down from `3` replicas to `1`,  
+When the operator reconciles the headless Service,  
+Then the Service selector still matches the remaining operator-managed Redis pod labels and no separate selector is left behind for removed ordinals.
 
 ---
 
@@ -167,7 +221,7 @@ Then `redis.example.io/cleanup` appears in `metadata.finalizers`.
 
 Given a `RedisInstance` CR with the finalizer set and a deletion timestamp present,  
 When the operator reconciles,  
-Then the operator tears down Sentinel instances (if applicable) before Redis pods, then removes the finalizer.
+Then the operator tears down Sentinel instances (if applicable) before Redis pods, deletes owned PVCs by default, and only then removes the finalizer.
 
 #### Scenario: CR deleted after finalizer removal
 
@@ -186,6 +240,12 @@ The operator MUST update the `status` subresource after each reconcile pass to r
 Given a newly created `RedisInstance` CR whose StatefulSet pods are not yet ready,  
 When the operator completes its first reconcile pass,  
 Then `status.phase` is `Pending`.
+
+#### Scenario: Observed generation updated after reconcile
+
+Given a `RedisInstance` CR whose desired spec has been processed successfully,  
+When the operator updates status,  
+Then `status.observedGeneration` is set to the current `metadata.generation`.
 
 #### Scenario: Phase set to Running when all replicas are ready
 
@@ -227,7 +287,13 @@ Then a `Warning` Kubernetes Event with reason `InstanceDegraded` is emitted on t
 
 ### Requirement: Authentication via Kubernetes Secrets
 
-When `spec.auth.passwordSecretRef` is set, the operator MUST configure Redis with the referenced password and MUST NOT expose credentials as environment variable literals.
+Authentication is optional in v1. When `spec.auth.passwordSecretRef` is set, the operator MUST configure Redis with the referenced password and MUST NOT expose credentials as environment variable literals.
+
+#### Scenario: Redis runs without auth when no password Secret is provided
+
+Given a `RedisInstance` CR with no `spec.auth.passwordSecretRef`,  
+When the operator reconciles it,  
+Then the Redis pods are configured without password authentication and the reconcile does not fail for a missing Secret.
 
 #### Scenario: Password Secret mounted into Redis pods
 
