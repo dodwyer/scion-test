@@ -1,0 +1,19 @@
+version: "3"
+
+tasks:
+  generate:
+    cmds:
+      - mkdir -p ./bin
+      - GOBIN=$(pwd)/bin go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5
+      - rm -f config/crd/bases/_.yaml
+      - ./bin/controller-gen object paths=./api/v1alpha1/...
+      - ./bin/controller-gen crd:crdVersions=v1 paths=./api/v1alpha1/... output:crd:artifacts:config=config/crd/bases
+      - ./bin/controller-gen rbac:roleName=redis-operator-manager-role paths=./internal/controller/... output:rbac:artifacts:config=config/rbac
+  test:
+    deps: [generate]
+    cmds:
+      - mkdir -p ./bin
+      - GOBIN=$(pwd)/bin go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+      - KUBEBUILDER_ASSETS=$(pwd)/$(./bin/setup-envtest use 1.30 --bin-dir ./bin -p path) go test ./...
+  verify:
+    deps: [test]
