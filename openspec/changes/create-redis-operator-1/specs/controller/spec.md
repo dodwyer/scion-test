@@ -72,6 +72,12 @@ Given an existing ConfigMap and a CR whose `spec.config` changes,
 when the controller reconciles,
 then the ConfigMap data MUST be patched to reflect the new config without recreating the ConfigMap.
 
+#### Scenario: Existing unowned ConfigMap is skipped
+
+Given a ConfigMap named `<cr-name>-config` already exists in the namespace without an owner reference to the `Redis` CR,
+when the controller reconciles,
+then the controller MUST leave the ConfigMap unchanged, log a warning Event indicating the resource is unowned, and continue reconciling the remaining resources without returning an error.
+
 ---
 
 ### Requirement: StatefulSet Reconciliation
@@ -102,6 +108,12 @@ Given a StatefulSet owned by a `Redis` CR,
 when the CR is deleted (after finalizer is removed),
 then Kubernetes garbage collection MUST delete the StatefulSet automatically via the owner reference.
 
+#### Scenario: Existing unowned StatefulSet is skipped
+
+Given a StatefulSet named `<cr-name>` already exists in the namespace without an owner reference to the `Redis` CR,
+when the controller reconciles,
+then the controller MUST leave the StatefulSet unchanged, log a warning Event indicating the resource is unowned, and continue reconciling the remaining resources without returning an error.
+
 ---
 
 ### Requirement: Service Reconciliation
@@ -128,6 +140,12 @@ then the client Service MUST have `type: LoadBalancer`.
 Given a StatefulSet with label `app.kubernetes.io/instance: <cr-name>`,
 when the controller reconciles,
 then both Services MUST select pods using that label.
+
+#### Scenario: Existing unowned Service is skipped
+
+Given either expected Service already exists in the namespace without an owner reference to the `Redis` CR,
+when the controller reconciles,
+then the controller MUST leave that Service unchanged, log a warning Event indicating the resource is unowned, and continue reconciling the remaining resources without returning an error.
 
 ---
 

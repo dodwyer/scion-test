@@ -40,7 +40,7 @@
 - [ ] Add readiness probe (`redis-cli ping`, initial delay 5s, period 10s) to pod template
 - [ ] Validate probes work against a live Redis pod in a local cluster
 
-## Phase 5 — Helm Chart
+## Phase 5 — Deployment Packaging
 
 - [ ] Create `charts/redis-operator/` directory structure
 - [ ] Write `Chart.yaml` with name, version, and appVersion
@@ -49,14 +49,13 @@
 - [ ] Template `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`
 - [ ] Template `CustomResourceDefinition` (embed or reference generated CRD YAML)
 - [ ] Add `NOTES.txt` with post-install usage instructions
-- [ ] Verify `helm lint` passes with no errors
-- [ ] Verify `helm template` renders valid Kubernetes YAML
-
-## Phase 6 — Kustomize Overlay
+## Phase 6 — Deployment Validation
 
 - [ ] Create `config/default/kustomization.yaml` (kubebuilder default layout)
 - [ ] Ensure `config/crd/`, `config/rbac/`, `config/manager/` directories are complete
 - [ ] Add namespace overlay example for single-namespace deployment mode
+- [ ] Verify `helm lint` passes with no errors
+- [ ] Verify `helm template` renders valid Kubernetes YAML
 - [ ] Verify `kubectl kustomize config/default` renders without errors
 
 ## Phase 7 — Testing
@@ -67,10 +66,13 @@
 - [ ] Write reconcile test: persistence enabled CR
 - [ ] Write reconcile test: CR deletion triggers finalizer cleanup
 - [ ] Write reconcile test: invalid spec fields are rejected by webhook or validation
+
+## Phase 8 — Validation
+
 - [ ] Verify `make test` passes with race detector enabled (`-race`)
 - [ ] (Optional) Add kind-based integration test in `test/e2e/`
 
-## Phase 8 — CI / Release
+## Phase 9 — CI / Release
 
 - [ ] Add GitHub Actions workflow: lint, test, build image, helm lint
 - [ ] Tag image with semantic version on release

@@ -12,7 +12,7 @@ The Redis Operator is a Kubernetes controller written in **Go** using the **kube
 | Framework | kubebuilder v4 | Code-generation for CRD manifests, RBAC markers, and webhook scaffolding |
 | Dependency | controller-runtime v0.17+ | Used internally by kubebuilder; exposes Reconciler interface |
 | Build | ko or Docker | `ko` for fast image builds without a Dockerfile; Docker as fallback |
-| Packaging | Helm chart (primary) + Kustomize overlay (secondary) | Helm for parameterised installs; Kustomize for GitOps pipelines |
+| Packaging | Helm chart (primary) + Kustomize overlay (secondary) | kubebuilder generates the base `config/` Kustomize layout; the Helm chart wraps those manifests for parameterised installs, while Kustomize remains suitable for GitOps pipelines |
 
 ## CRD Schema
 
@@ -118,6 +118,8 @@ The controller's ServiceAccount requires the following permissions:
 ```
 
 ## Deployment Topology
+
+The repository follows the standard kubebuilder-generated `config/` layout for CRDs, RBAC, and manager manifests. The Helm chart at `charts/redis-operator/` wraps those same resources into a parameterised installation path rather than introducing a separate deployment model.
 
 ### Single-Namespace Mode
 

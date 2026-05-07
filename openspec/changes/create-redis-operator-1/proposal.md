@@ -24,7 +24,7 @@ A purpose-built operator solves this by:
 
 ## Non-Goals (v1)
 
-- Redis Sentinel or Redis Cluster (sharded HA topology).
+- Redis Sentinel or Redis Cluster (advanced HA / sharded topology beyond basic master-replica).
 - Backup and restore workflows.
 - TLS certificate provisioning.
 - Cross-namespace Redis instances.
@@ -37,11 +37,10 @@ The following questions remain unresolved and must be decided before implementat
 | # | Question | Options |
 |---|----------|---------|
 | 1 | Operator toolchain | kubebuilder scaffolding, controller-runtime directly, operator-sdk |
-| 2 | Topology scope for v1 | Standalone only, or include basic master-replica |
-| 3 | Persistence requirement | PVC-backed persistence required in v1, or optional |
-| 4 | Deployment packaging | Helm chart, Kustomize, or raw manifests |
-| 5 | Testing strategy | envtest unit tests, full integration tests, or both |
-| 6 | Redis version support | 6.x only, 7.x only, or both |
+| 2 | Persistence requirement | PVC-backed persistence required in v1, or optional |
+| 3 | Deployment packaging | Helm chart, Kustomize, or raw manifests |
+| 4 | Testing strategy | envtest unit tests, full integration tests, or both |
+| 5 | Redis version support | 6.x only, 7.x only, or both |
 
 ## Stakeholders
 
