@@ -72,7 +72,10 @@ func (r *RedisInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if phase, reason, err := r.validateReferencedSecrets(ctx, instance); err != nil {
+		return ctrl.Result{}, err
+	} else if phase != "" {
 		base := instance.DeepCopy()
+		r.Recorder.Event(instance, corev1.EventTypeWarning, reason, "Secret validation failed: "+reason)
 		if statusErr := r.patchStatus(ctx, base, instance, phase, reason, previousPhase); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
