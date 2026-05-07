@@ -228,6 +228,23 @@ func TestSentinelStartScriptIncludesAuthPassWhenPasswordConfigured(t *testing.T)
 	}
 }
 
+func TestRedisStartScriptConfiguresReplicasForSentinelTopology(t *testing.T) {
+	reconciler := newTestReconciler(t)
+	instance := validRedisInstance("default", "sentinel-replica")
+	instance.Spec.Topology = redisv1alpha1.TopologySentinel
+
+	script := reconciler.redisStartScript(instance)
+	if !strings.Contains(script, `if [ "${ordinal}" != "0" ]; then`) {
+		t.Fatalf("expected non-zero ordinals to be wired as replicas, got:\n%s", script)
+	}
+	if !strings.Contains(script, `echo "replicaof sentinel-replica-0.sentinel-replica.${POD_NAMESPACE}.svc.cluster.local 6379" >> /tmp/redis.conf`) {
+		t.Fatalf("expected replicaof stanza targeting pod-0 DNS, got:\n%s", script)
+	}
+	if strings.Contains(script, `REDIS_TOPOLOGY`) {
+		t.Fatalf("expected replica wiring to be independent of topology guard, got:\n%s", script)
+	}
+}
+
 func TestFinalizerDeletesOwnedResourcesAndPVCs(t *testing.T) {
 	reconciler := newTestReconciler(t)
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "delete-flow"}}

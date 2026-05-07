@@ -834,7 +834,7 @@ EOF`, redisPort)
 set -eu
 cp /config/redis.conf /tmp/redis.conf
 ordinal="${POD_NAME##*-}"
-if [ "${REDIS_TOPOLOGY}" = "standalone" ] && [ "${ordinal}" != "0" ]; then
+if [ "${ordinal}" != "0" ]; then
   echo "replicaof %s-0.%s.${POD_NAMESPACE}.svc.cluster.local %d" >> /tmp/redis.conf
 fi
 %s
