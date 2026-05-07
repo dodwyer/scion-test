@@ -1,0 +1,13 @@
+version: "3"
+
+tasks:
+  generate:
+    cmds:
+      - go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5 object paths=./api/...
+      - mkdir -p config/crd/bases
+      - go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5 crd paths=./api/... output:crd:artifacts:config=config/crd/bases
+  verify:
+    cmds:
+      - task generate
+      - mkdir -p .bin
+      - sh -c 'KUBEBUILDER_ASSETS="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest use -p path 1.32.x!)" go test ./...'
