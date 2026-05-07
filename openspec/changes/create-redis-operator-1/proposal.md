@@ -48,6 +48,8 @@ Operating Redis on Kubernetes manually requires maintaining StatefulSets, Servic
 
 ## Open Questions
 
+The following questions are pre-implementation decisions. They MUST be resolved before the Deployment and Documentation tasks begin.
+
 1. **Namespace watch scope** — Should the operator watch all namespaces (cluster-wide) or only the namespace it is deployed in? Cluster-wide is the typical default but requires `ClusterRole`; namespace-scoped reduces blast radius.
 2. **Container registry** — Where will the operator image be published? This affects the default `image` reference in Helm/Kustomize and any image pull secret requirements.
 3. **Primary deployment mechanism** — Should the operator ship as a Helm chart, a Kustomize base, or both? This influences how CRD installation and upgrades are handled.

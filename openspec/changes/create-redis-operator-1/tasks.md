@@ -43,8 +43,8 @@
 
 - [ ] Write multi-stage `Dockerfile` (build stage: `golang`, runtime stage: distroless or UBI-minimal)
 - [ ] Add `Makefile` targets: `docker-build`, `docker-push`, `deploy`, `undeploy`
-- [ ] Create Helm chart under `charts/redis-operator/` with `Chart.yaml`, `values.yaml`, templates for Deployment, CRD, RBAC, ServiceAccount
 - [ ] Create Kustomize base under `config/default/` (kubebuilder layout)
+- [ ] Create Helm chart skeleton under `charts/redis-operator/` with `Chart.yaml`, `values.yaml`, templates for Deployment, CRD, RBAC, ServiceAccount
 - [ ] Document image registry and tag conventions in `values.yaml`
 - [ ] Set up GitHub Actions (or equivalent) CI pipeline: lint, test, build, push image, package Helm chart
 - [ ] Add `PodDisruptionBudget` for operator HA

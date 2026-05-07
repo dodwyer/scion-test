@@ -29,7 +29,7 @@
 └─────────────────────────────────────────────────────┘
 ```
 
-The operator runs as a single `Deployment` (with leader election enabling multiple replicas for HA). It watches `Redis` custom resources and drives the owned Kubernetes resources toward the desired state on every reconcile.
+The operator runs as a single `Deployment` in the `redis-system` namespace (with leader election enabling multiple replicas for HA). It watches `Redis` custom resources and drives the owned Kubernetes resources toward the desired state on every reconcile. The manager can be configured at deploy time to watch all namespaces or a single namespace via controller-runtime manager options, so the Deployment namespace and the watch scope are distinct concerns.
 
 ## Framework Choices
 
@@ -184,10 +184,12 @@ The controller emits `Normal` and `Warning` events on the `Redis` object:
 
 ## Deployment Approach
 
-The operator ships with both a **Helm chart** (primary) and a **Kustomize base** (secondary):
+The operator is expected to ship with both a **Helm chart** and a **Kustomize base**. Which packaging option is considered the primary deployment mechanism remains an open pre-implementation decision.
 
 - **Helm chart** — installs CRD, RBAC, Deployment, and ServiceAccount; supports `values.yaml` overrides for image, replicas, resource limits, and namespace watch mode.
 - **Kustomize base** — raw manifests under `config/` (kubebuilder layout) suitable for `kubectl apply -k`.
+
+In both packaging modes, the operator `Deployment` itself runs in the `redis-system` namespace. Watch scope is configured separately through manager options so the same Deployment can operate cluster-wide or be restricted to a single namespace.
 
 CRD installation is handled by Helm's `crds/` directory (auto-applied before other resources).
 

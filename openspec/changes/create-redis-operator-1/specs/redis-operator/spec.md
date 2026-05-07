@@ -247,7 +247,7 @@ Then `redis.status.readyReplicas` matches the StatefulSet value.
 
 ### Requirement: RBAC Minimal Permissions
 
-The operator's `ServiceAccount` MUST be bound to a `ClusterRole` that grants only the permissions required for reconciliation, following the principle of least privilege.
+The operator's `ServiceAccount` MUST be bound to RBAC roles that grant only the permissions required for reconciliation, following the principle of least privilege.
 
 #### Scenario: ClusterRole grants access to Redis CRD resources
 
@@ -263,6 +263,16 @@ Then the `ClusterRole` includes rules for `create`, `get`, `list`, `watch`, `upd
 And equivalent rules on core `services`, `configmaps`, and `secrets`,
 And `create`, `patch` on core `events`.
 
+#### Scenario: RBAC matches the selected watch scope
+
+Given the operator is installed in cluster-scoped mode watching all namespaces,
+Then its `ServiceAccount` is bound to a `ClusterRole` and `ClusterRoleBinding` that permit cross-namespace `list` and `watch` on `Redis` resources and owned objects,
+And the rules include only the cluster-scoped permissions required for that mode.
+
+Given the operator is installed in namespace-scoped mode watching a single namespace,
+Then its `ServiceAccount` is bound only to namespace-limited RBAC for that namespace,
+And it does not grant cross-namespace `list` or `watch` permissions that are unnecessary in namespace-scoped mode.
+
 #### Scenario: ClusterRole does not grant cluster-admin or wildcard verbs
 
 Given the operator `ClusterRole`,
@@ -274,7 +284,7 @@ Then no rule uses `*` for verbs, resources, or API groups.
 Given the operator's `ServiceAccount` exists in the operator namespace,
 When it is inspected,
 Then it is not the `default` ServiceAccount,
-And it is bound to exactly the operator's `ClusterRole` and no broader roles.
+And it is bound only to the operator RBAC roles required for the selected watch scope and no broader roles.
 
 ---
 
