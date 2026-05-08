@@ -1,0 +1,8 @@
+apiVersion: redis.example.com/v1alpha1
+kind: Redis
+metadata:
+  name: my-redis-cluster
+spec:
+  replicas: 3
+  storage:
+    size: 1Gi

@@ -1,0 +1,8 @@
+apiVersion: redis.example.com/v1
+kind: redis
+metadata:
+  name: my.redis
+spec:
+  replicas: "three"
+  storage:
+    size: 0Gi
