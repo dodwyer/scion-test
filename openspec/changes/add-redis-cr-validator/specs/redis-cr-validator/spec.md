@@ -80,7 +80,7 @@ The `kind` field MUST equal the exact string `Redis` (case-sensitive).
 
 ### Requirement: metadata.name Validation
 
-The `metadata.name` field MUST be present, non-empty, and conform to DNS subdomain format as defined by RFC 1123: lowercase alphanumeric characters or hyphens, no leading or trailing hyphens, maximum 253 characters.
+The `metadata.name` field MUST be present, non-empty, and conform to Kubernetes simple name semantics: lowercase alphanumeric characters and hyphens only, no dots, no leading or trailing hyphens, and maximum 253 characters. This is intentionally stricter than full DNS subdomain semantics to match common Redis resource naming patterns.
 
 #### Scenario: Valid name
 
@@ -98,13 +98,19 @@ The `metadata.name` field MUST be present, non-empty, and conform to DNS subdoma
 
 **Given** a Redis CR YAML where `metadata.name` is `MyRedis`  
 **When** the validator runs  
-**Then** the validator MUST emit an error for `metadata.name` citing the DNS subdomain format violation
+**Then** the validator MUST emit an error for `metadata.name` citing the Kubernetes simple name format violation
 
 #### Scenario: Name with leading hyphen
 
 **Given** a Redis CR YAML where `metadata.name` is `-my-redis`  
 **When** the validator runs  
-**Then** the validator MUST emit an error for `metadata.name` citing the DNS subdomain format violation
+**Then** the validator MUST emit an error for `metadata.name` citing the Kubernetes simple name format violation
+
+#### Scenario: Name with dot
+
+**Given** a Redis CR YAML where `metadata.name` is `my.redis`
+**When** the validator runs
+**Then** the validator MUST emit an error for `metadata.name` citing that dots are not allowed
 
 #### Scenario: Name exceeds 253 characters
 
@@ -116,7 +122,7 @@ The `metadata.name` field MUST be present, non-empty, and conform to DNS subdoma
 
 ### Requirement: spec.replicas Validation
 
-The `spec.replicas` field MUST be a positive integer with a value of at least `1`. Zero, negative integers, floats, and non-numeric strings are all invalid.
+The `spec.replicas` field MUST be a positive integer with a value of at least `1`. Zero, negative integers, floats, and non-numeric strings are all invalid. Scalar type errors such as `spec.replicas: "three"` MUST be reported as validation errors for the field path and MUST exit with code `1`, not as parse errors.
 
 #### Scenario: Valid replicas
 
@@ -141,6 +147,32 @@ The `spec.replicas` field MUST be a positive integer with a value of at least `1
 **Given** a Redis CR YAML where `spec.replicas` is `"three"`  
 **When** the validator runs  
 **Then** the validator MUST emit an error for `spec.replicas` citing the integer type requirement
+
+---
+
+### Requirement: Validation Parsing Contract
+
+The validator MUST use two-stage parsing so scalar type errors are returned as field-path validation errors in the same pass as semantic validation errors. It MUST first parse YAML into a flexible intermediate representation to preserve and inspect scalar types, collect type errors for known fields, and then validate field values. Typed unmarshalling into an implementation struct MAY happen only after type validation for known fields has completed.
+
+#### Scenario: Scalar type error is validation error
+
+**Given** a syntactically valid Redis CR YAML where `spec.replicas` is `"three"`
+**When** the validator runs
+**Then** the validator MUST emit an `ERROR:` line for `spec.replicas`
+**And** it MUST exit with code `1`
+
+#### Scenario: Scalar type errors collected with semantic errors
+
+**Given** a syntactically valid Redis CR YAML where `spec.replicas` is `"three"` and `kind` is `redis`
+**When** the validator runs
+**Then** the validator MUST emit errors for both `spec.replicas` and `kind` in the same run
+**And** it MUST exit with code `1`
+
+#### Scenario: Malformed YAML is parse error
+
+**Given** a YAML document that is not syntactically valid YAML
+**When** the validator runs
+**Then** it MUST print a parse error to stderr and exit with code `2`
 
 ---
 
@@ -215,7 +247,7 @@ The validator MUST exit with a well-defined code that reflects the outcome categ
 
 #### Scenario: Parse or I/O error
 
-**Given** a file path that does not exist, or a YAML document that cannot be parsed into the expected structure  
+**Given** a file path that does not exist, or a YAML document that is syntactically malformed
 **When** the validator runs  
 **Then** it MUST exit with code `2`
 
@@ -245,14 +277,14 @@ The validator package MUST include unit tests that cover the valid case and each
 
 #### Scenario: Valid CR test
 
-**Given** a unit test constructing a fully valid `RedisCR` struct  
-**When** `Validate` is called  
+**Given** a unit test constructing or decoding a fully valid Redis CR representation
+**When** the validation entry point is called
 **Then** the returned error slice MUST be empty
 
 #### Scenario: Each invalid-field test
 
-**Given** a unit test constructing a `RedisCR` with exactly one invalid field  
-**When** `Validate` is called  
+**Given** a unit test constructing or decoding a Redis CR representation with exactly one invalid field
+**When** the validation entry point is called
 **Then** the returned error slice MUST contain exactly one entry referencing the correct field path
 
 ---
