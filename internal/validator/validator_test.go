@@ -182,6 +182,18 @@ func TestValidate_StorageSizeZero(t *testing.T) {
 	}
 }
 
+func TestValidate_StorageSizeNegative(t *testing.T) {
+	cr := validCR()
+	cr.Spec.Storage.Size = "-1Gi"
+	errs := Validate(cr)
+	if len(errs) != 1 || errs[0].Field != "spec.storage.size" {
+		t.Errorf("expected one spec.storage.size error for negative value, got %v", errs)
+	}
+	if !strings.Contains(errs[0].Message, "greater than zero") {
+		t.Errorf("expected 'greater than zero' in message, got %q", errs[0].Message)
+	}
+}
+
 func TestValidate_StorageSizeInvalid(t *testing.T) {
 	cr := validCR()
 	cr.Spec.Storage.Size = "notasize"

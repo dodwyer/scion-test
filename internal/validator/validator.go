@@ -199,10 +199,10 @@ func validateStorageSize(size string) []ValidationError {
 			Message: fmt.Sprintf("must be a valid Kubernetes resource quantity (e.g. 1Gi, 500Mi): %v", err),
 		}}
 	}
-	if q.IsZero() {
+	if q.Cmp(resource.MustParse("0")) <= 0 {
 		return []ValidationError{{
 			Field:   "spec.storage.size",
-			Message: "must be greater than zero",
+			Message: "value must be greater than zero",
 		}}
 	}
 	return nil
