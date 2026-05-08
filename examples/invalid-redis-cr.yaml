@@ -1,0 +1,9 @@
+# This file intentionally contains multiple validation errors for demonstration.
+apiVersion: redis.example.com/v2beta1  # wrong: must be redis.example.com/v1alpha1
+kind: redis                            # wrong: must be Redis (case-sensitive)
+metadata:
+  name: ""                             # wrong: must not be empty
+spec:
+  replicas: 0                          # wrong: must be a positive integer >= 1
+  storage:
+    size: "1024"                       # wrong: plain integer, must include a unit suffix (e.g. 1Gi)
