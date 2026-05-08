@@ -14,12 +14,12 @@ Validation rules:
 | `spec.replicas` | Must be present and a positive integer (≥ 1) |
 | `spec.storage.size` | Must be present and match a Kubernetes storage quantity pattern (e.g. `1Gi`, `500Mi`, `2Ti`) |
 
-## Files Affected
+## Affected Files
 
 | File | Change |
 |------|--------|
-| `validator/main.go` (or `validator/validator.py`) | New — CLI entry point and validation logic |
-| `validator/validator_test.go` (or `validator/test_validator.py`) | New — unit tests for each validation rule |
+| `validator/main.go` | New — CLI entry point and validation logic |
+| `validator/validator_test.go` | New — unit tests for each validation rule |
 | `examples/valid-redis-cr.yaml` | New — example Redis CR with all required fields set correctly |
 | `examples/invalid-missing-name.yaml` | New — example CR missing `metadata.name` |
 | `examples/invalid-missing-replicas.yaml` | New — example CR missing `spec.replicas` |
@@ -41,4 +41,4 @@ Validation rules:
 ## Risks
 
 - The storage quantity regex may not cover all edge cases in the full Kubernetes resource.Quantity spec. Document the subset supported and link to upstream spec.
-- Tool language choice (Go vs Python) is left to the implementer; this spec is language-agnostic.
+- The validator is specified as a Go CLI because Go is the conventional implementation language for Kubernetes tooling.
